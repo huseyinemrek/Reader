@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId}/books/{fileName} {
+      allow read, write: if isOwner(userId);
+    }
+    match /users/{userId}/covers/{fileName} {
+      allow read, write: if isOwner(userId);
+    }
+    match /users/{userId}/layouts/{fileName} {
+      allow read, write: if isOwner(userId);
+    }
+  }
+}

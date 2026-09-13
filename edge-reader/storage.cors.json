@@ -1,0 +1,22 @@
+[
+  {
+    "origin": [
+      "https://book-reader-upload.web.app",
+      "https://book-reader-upload.firebaseapp.com",
+      "http://localhost:5000",
+      "http://127.0.0.1:5000"
+    ],
+    "method": ["GET", "HEAD"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Content-Range",
+      "Accept-Ranges",
+      "Content-Encoding",
+      "ETag",
+      "Range",
+      "Authorization"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Premium Edge Reader</title>
+    <!-- Google Fonts for Modern Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,600;1,400;1,600&family=Lora:ital,wght@0,400;0,600;1,400;1,600&family=Outfit:ital,wght@0,400;0,600;1,400;1,600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+    <!-- JSZip for handling HTMLZ (Zip) files -->
+    <script src="/libs/jszip.min.js"></script>
+    <!-- PDF.js for handling PDF files -->
+    <script src="/libs/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/libs/pdf.worker.min.js';
+    </script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
+</head>
+<body>
+    
+    <!-- Auth Modal (Login/Signup) -->
+    <div id="auth-modal" class="auth-overlay">
+        <div class="auth-card glass-panel">
+            <h2 id="auth-title"><i class="fa-solid fa-cloud"></i> Bulut Kütüphane</h2>
+            <p id="auth-subtitle">Kitaplarınızı her cihazdan erişilebilir yapın.</p>
+            
+            <form id="auth-form">
+                <input type="email" id="auth-email" placeholder="E-posta Adresi" required>
+                <input type="password" id="auth-password" placeholder="Şifre" required>
+                <button type="submit" id="auth-submit-btn" class="upload-btn">Giriş Yap</button>
+            </form>
+            
+            <div id="auth-error" class="auth-error" style="display: none;"></div>
+        </div>
+    </div>
+
+    <!-- Library View -->
+    <div id="library-view" class="active" style="display: none;"> <!-- Başlangıçta gizli tut, auth listener açacak -->
+        <header class="library-header glass-panel">
+            <h1><i class="fa-solid fa-book-open-reader"></i> Kütüphanem</h1>
+            <div class="library-actions">
+                <span id="user-email-display" class="user-email"></span>
+                <label for="book-upload" class="upload-btn">
+                    <i class="fa-solid fa-plus"></i> Yeni Kitap Ekle
+                </label>
+                <button id="logout-btn" class="upload-btn" style="background: #e53935;"><i class="fa-solid fa-right-from-bracket"></i> Çıkış</button>
+                <input type="file" id="book-upload" accept=".epub,.pdf,.html,.htm,.htmlz,.zip" style="display: none;">
+            </div>
+        </header>
+        
+        <div id="loading-overlay" style="display: none;">
+            <div class="loader-spinner"></div>
+            <p id="loading-text">Kitap işleniyor, lütfen bekleyin...</p>
+        </div>
+
+        <div class="library-grid" id="library-grid">
+            <!-- Book cards will be injected here -->
+        </div>
+    </div>
+
+    <!-- Reader View (Hidden initially) -->
+    <div id="reader-view" style="display: none;">
+        <!-- Progress Bar at top -->
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+
+        <!-- Floating Action Buttons -->
+        <button class="icon-btn" id="toc-toggle" title="İçindekiler"><i class="fa-solid fa-list-ul"></i></button>
+        <button class="icon-btn" id="tts-toggle" title="Sesli Oku" style="background: linear-gradient(135deg, #FF9800 0%, #FF5722 100%); color: white; box-shadow: 0 4px 15px rgba(255,152,0,0.4);"><i class="fa-solid fa-headphones"></i></button>
+        <button class="icon-btn" id="settings-toggle" title="Ayarlar" style="background: var(--ui-primary); color: white; box-shadow: 0 4px 15px rgba(33,150,243,0.4);"><i class="fa-solid fa-gear"></i></button>
+
+        <!-- Page Navigation Buttons (for Paged Mode) -->
+        <button class="paged-nav-btn" id="paged-prev-btn" title="Önceki Sayfa" aria-label="Önceki Sayfa"><i class="fa-solid fa-chevron-left"></i></button>
+        <button class="paged-nav-btn" id="paged-next-btn" title="Sonraki Sayfa" aria-label="Sonraki Sayfa"><i class="fa-solid fa-chevron-right"></i></button>
+        
+        <!-- Bottom Page Indicator (for Paged Mode) -->
+        <button type="button" id="paged-indicator" class="glass-panel paged-indicator" title="Sayfaya Git (G)" aria-label="Sayfaya Git">
+            <span id="paged-page-text">Sayfa 1 / 1</span>
+            <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true" style="font-size: 0.72rem; margin-left: 6px; opacity: 0.7;"></i>
+        </button>
+
+        <!-- Top Navigation -->
+        <div id="reader-nav-hit-area"></div>
+        <div id="reader-nav">
+            <button class="icon-btn" id="back-to-library" title="Kütüphaneye Dön"><i class="fa-solid fa-arrow-left"></i></button>
+            <div id="current-book-title">Kitap Adı</div>
+            <button class="icon-btn" id="open-page-jump" title="Sayfaya Git (G)"><i class="fa-solid fa-bookmark"></i></button>
+        </div>
+
+        <!-- The actual book content -->
+        <main id="reader-container">
+            <div id="book-viewport">
+                <article id="book-content" lang="tr" tabindex="0"></article>
+            </div>
+        </main>
+    </div>
+
+    <!-- TOC Sidebar -->
+    <div id="toc-sidebar" class="glass-panel sidebar" aria-hidden="true">
+        <div class="sidebar-header">
+            <h2>İçindekiler</h2>
+            <button id="toc-close" class="close-btn"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div class="toc-content" id="toc-content">
+            <ul id="toc-list"></ul>
+        </div>
+    </div>
+
+    <!-- Settings Sidebar -->
+    <div id="settings-sidebar" class="glass-panel sidebar" aria-hidden="true">
+        <div class="sidebar-header">
+            <h2>Ayarlar</h2>
+            <button id="settings-close" class="close-btn"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        
+        <div class="settings-content">
+            <!-- Theme Presets -->
+            <div class="setting-group">
+                <label>Hazır Temalar</label>
+                <div class="theme-presets">
+                    <button class="theme-btn" data-theme="original" title="Orijinal Tema" style="background: linear-gradient(135deg, #a1c4fd, #c2e9fb); color: #333; border-color: #a1c4fd"><i class="fa-solid fa-book"></i></button>
+                    <button class="theme-btn" data-theme="dark" title="Koyu Mod" style="background: #181818; color: #cca922; border-color: #333"></button>
+                    <button class="theme-btn" data-theme="light" title="Açık Mod" style="background: #f4f4f4; color: #333; border-color: #ddd"></button>
+                    <button class="theme-btn" data-theme="sepia" title="Sepya" style="background: #f4ecd8; color: #5b4636; border-color: #e4dcc8"></button>
+                    <button class="theme-btn" data-theme="oled" title="OLED Koyu" style="background: #000; color: #d1d1d1; border-color: #222"></button>
+                </div>
+            </div>
+
+            <hr>
+
+            <!-- Reading Mode -->
+            <div class="setting-group">
+                <label>Okuma Modu</label>
+                <div class="reading-mode-presets">
+                    <button type="button" class="mode-btn active" data-mode="scroll" id="mode-scroll-btn">
+                        <i class="fa-solid fa-arrows-up-down"></i> Kaydırma
+                    </button>
+                    <button type="button" class="mode-btn" data-mode="paged" id="mode-paged-btn">
+                        <i class="fa-solid fa-book-open"></i> Sayfa Sayfa
+                    </button>
+                </div>
+            </div>
+
+            <hr>
+
+            <!-- Custom Colors -->
+            <div class="setting-group">
+                <label for="bg-color-picker">Arkaplan Rengi (Dış Kısım)</label>
+                <div class="color-picker-wrapper">
+                    <input type="color" id="bg-color-picker" value="#181818">
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <label for="container-bg-picker">Sayfa Rengi (İç Kısım)</label>
+                <div class="color-picker-wrapper">
+                    <input type="color" id="container-bg-picker" value="#333333">
+                </div>
+            </div>
+
+            <div class="setting-group">
+                <label for="text-color-picker">Yazı Rengi</label>
+                <div class="color-picker-wrapper">
+                    <input type="color" id="text-color-picker" value="#cca922">
+                </div>
+            </div>
+
+            <hr>
+
+            <!-- Typography -->
+            <div class="setting-group">
+                <label for="font-family-select">Yazı Tipi</label>
+                <select id="font-family-select">
+                    <option value="original">Kitabın Orijinal Fontu</option>
+                    <option value="'Inter', sans-serif">Inter (Modern)</option>
+                    <option value="'Outfit', sans-serif">Outfit (Şık)</option>
+                    <option value="'Lora', serif">Lora (Klasik Kitap)</option>
+                    <option value="system-ui, -apple-system, sans-serif">Sistem Varsayılanı</option>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <label for="font-size-slider">Yazı Boyutu: <span id="font-size-val">24px</span></label>
+                <input type="range" id="font-size-slider" min="14" max="48" value="24" step="1">
+            </div>
+
+            <div class="setting-group">
+                <label for="line-height-slider">Satır Aralığı: <span id="line-height-val">2.0</span></label>
+                <input type="range" id="line-height-slider" min="1.0" max="3.0" value="2.0" step="0.1">
+            </div>
+            
+            <div class="setting-group">
+                <label for="max-width-slider">Sayfa Genişliği: <span id="max-width-val">900px</span></label>
+                <input type="range" id="max-width-slider" min="500" max="1600" value="900" step="50">
+            </div>
+
+            <div class="setting-group">
+                <label for="side-padding-slider">Kenar Boşluğu: <span id="side-padding-val">80px</span></label>
+                <input type="range" id="side-padding-slider" min="0" max="200" value="80" step="10">
+            </div>
+
+            <div class="setting-group">
+                <label for="paragraph-spacing-slider">Paragraf Aralığı: <span id="paragraph-spacing-val">1.5em</span></label>
+                <input type="range" id="paragraph-spacing-slider" min="0" max="5" value="1.5" step="0.1">
+            </div>
+
+            <hr>
+            
+            <button id="save-default-settings-btn" class="upload-btn" style="width: 100%; margin-top: 10px; font-size: 0.9rem; background: linear-gradient(135deg, #4caf50 0%, #81c784 100%); color: white;">
+                <i class="fa-solid fa-floppy-disk"></i> Varsayılan Olarak Kaydet
+            </button>
+
+            <button id="reset-settings-btn" class="upload-btn" style="width: 100%; margin-top: 10px; font-size: 0.9rem; background: linear-gradient(135deg, #757f9a 0%, #d7dde8 100%); color: #333;">
+                <i class="fa-solid fa-rotate-left"></i> Varsayılanlara Dön
+            </button>
+
+            <button id="delete-book-btn" class="upload-btn" style="width: 100%; margin-top: 10px; font-size: 0.9rem; background: linear-gradient(135deg, #e53935 0%, #e35d5b 100%);">
+                <i class="fa-solid fa-trash"></i> Kütüphaneden Sil
+            </button>
+        </div>
+    </div>
+
+    <!-- Floating TTS Player Controls -->
+    <div id="tts-player" class="glass-panel tts-player-card">
+        <button class="tts-btn" id="tts-prev-sentence" title="Önceki Cümle"><i class="fa-solid fa-backward-step"></i></button>
+        <button class="tts-btn play-btn" id="tts-play-pause" title="Oynat / Durdur"><i class="fa-solid fa-play"></i></button>
+        <button class="tts-btn" id="tts-next-sentence" title="Sonraki Cümle"><i class="fa-solid fa-forward-step"></i></button>
+        
+        <div class="tts-divider"></div>
+        
+        <div class="tts-control-group">
+            <i class="fa-solid fa-gauge-high"></i>
+            <select id="tts-speed" title="Okuma Hızı">
+                <option value="0.75">0.75x</option>
+                <option value="1.0" selected>1.0x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="1.75">1.75x</option>
+                <option value="2.0">2.0x</option>
+                <option value="2.25">2.25x</option>
+                <option value="2.5">2.5x</option>
+                <option value="2.75">2.75x</option>
+                <option value="3.0">3.0x</option>
+                <option value="3.5">3.5x</option>
+                <option value="4.0">4.0x</option>
+            </select>
+        </div>
+        
+        <div class="tts-divider"></div>
+        
+        <div class="tts-control-group voice-group">
+            <i class="fa-solid fa-volume-high"></i>
+            <select id="tts-voice" title="Ses Seçimi">
+                <!-- Programmatically populated -->
+            </select>
+        </div>
+        
+        <button class="tts-btn close-tts-btn" id="tts-close" title="Sesli Okumayı Kapat"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+
+    <!-- Sayfaya Git (Page Jump) Modal -->
+    <dialog id="page-jump-modal" class="modal-overlay" aria-labelledby="page-jump-title">
+        <div class="glass-panel modal-card">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <i class="fa-solid fa-bookmark" aria-hidden="true"></i>
+                    <h2 id="page-jump-title">Sayfaya Git</h2>
+                </div>
+                <button type="button" id="page-jump-close" class="close-btn" title="Kapat" aria-label="Kapat"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+            </div>
+            <form id="page-jump-form">
+                <div class="modal-body">
+                    <p class="jump-info">Gitmek istediğiniz sayfa numarasını girin veya kaydırıcıyı kullanın:</p>
+                    <p class="jump-note" id="jump-page-note">EPUB sayfa sayısı ekran düzenine göre hesaplanır; basılı sayfa numarası değildir.</p>
+                    <label class="jump-field-label" for="page-jump-input">Sayfa numarası</label>
+                    <div class="jump-input-row">
+                        <input type="number" id="page-jump-input" min="1" max="1" step="1" value="1" inputmode="numeric" required aria-describedby="page-jump-status jump-page-note">
+                        <span class="jump-total-text">/ <span id="jump-total-pages">1</span></span>
+                        <button type="submit" id="page-jump-submit" class="upload-btn jump-submit-btn">Git</button>
+                    </div>
+                    <p id="page-jump-status" class="page-jump-status" aria-live="polite" role="status"></p>
+                    <div class="jump-slider-row">
+                        <label class="jump-field-label" for="page-jump-slider">Sayfaya hızlı git</label>
+                        <input type="range" id="page-jump-slider" min="1" max="1" value="1" step="1" aria-label="Sayfaya hızlı git">
+                    </div>
+                    <p class="jump-hint">İpucu: Okuma ekranında <strong>G</strong> tuşuna basarak doğrudan bu menüyü açabilirsiniz.</p>
+                </div>
+            </form>
+        </div>
+    </dialog>
+
+    <script type="module" src="/script.js"></script>
+</body>
+</html>

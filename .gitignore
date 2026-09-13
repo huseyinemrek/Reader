@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+**/node_modules/**
+package-lock.json
+
+# Books / Uploads (large binary files)
+uploads/
+**/uploads/**
+*.epub
+*.pdf
+
+# Firebase cache / logs
+.firebase/
+*-debug.log
+*.log
+
+# Large images / screenshots in root
+*.png
+
+# Local archive / offline server (kept local only)
+save/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
