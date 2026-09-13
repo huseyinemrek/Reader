@@ -358,13 +358,13 @@ document.addEventListener('DOMContentLoaded', () => {
             currentUser = user;
             authModal.style.display = 'none';
             userEmailDisplay.innerText = user.email;
-            libraryView.style.display = 'block';
             await loadLibrary();
             handleRouting();
         } else {
             releaseBook();
             currentUser = null;
             authModal.style.display = 'flex';
+            libraryView.classList.remove('active');
             libraryView.style.display = 'none';
             readerView.style.display = 'none';
             globalLibrary = [];
@@ -533,11 +533,13 @@ document.addEventListener('DOMContentLoaded', () => {
     function closeReader() {
         releaseBook();
         readerView.style.display = 'none';
+        libraryView.style.display = 'block';
         libraryView.classList.add('active');
         closeSidebar(settingsSidebar);
         closeSidebar(tocSidebar);
         document.title = 'Premium Edge Reader';
         if (location.pathname !== '/') history.pushState(null, '', '/');
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
         loadLibrary();
     }
     backToLibraryBtn.addEventListener('click', closeReader);
@@ -1060,7 +1062,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (token !== session) return;
             libraryView.classList.remove('active');
+            libraryView.style.display = 'none';
             readerView.style.display = 'block';
+            window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
             applySettings();
             const saved = book.readerPosition;
             let chapter = currentBookType === 'epub' ? Number(params.get('ch') ?? saved?.chapterIndex ?? book.chapterIndex ?? 0) : 0;
