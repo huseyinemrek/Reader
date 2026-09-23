@@ -767,9 +767,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function startPagination() {
+        const token = session;
+        const key = getLayoutKey();
+        const currentSignal = paginationAbort.signal;
         paginationPromise = countBookPages();
         paginationPromise.catch(error => {
-            if (error.name === 'AbortError') return;
+            if (currentSignal.aborted || token !== session || key !== getLayoutKey() || error.name === 'AbortError') return;
             console.error(error);
             pagedPageText.textContent = 'Sayfa sayısı hesaplanamadı';
             document.getElementById('page-jump-status').textContent = 'Sayfa sayısı hesaplanamadı. Kitabı yeniden açın.';
