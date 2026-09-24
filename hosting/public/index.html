@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,600;1,400;1,600&family=Lora:ital,wght@0,400;0,600;1,400;1,600&family=Outfit:ital,wght@0,400;0,600;1,400;1,600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/style.css?v=20260913_fix2">
+    <link rel="stylesheet" href="/style.css?v=20260923_library_pdf">
     <!-- JSZip for handling HTMLZ (Zip) files -->
     <script src="/libs/jszip.min.js"></script>
     <!-- PDF.js for handling PDF files -->
@@ -143,6 +143,13 @@
                         <i class="fa-solid fa-book-open"></i> Sayfa Sayfa
                     </button>
                 </div>
+            </div>
+
+            <div class="setting-group" id="original-pdf-setting" hidden>
+                <label>PDF Görünümü</label>
+                <a id="open-original-pdf" class="mode-btn" target="_blank" rel="noopener noreferrer">
+                    <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Orijinal PDF'yi tarayıcıda aç
+                </a>
             </div>
 
             <hr>
@@ -293,6 +300,6 @@
         </div>
     </dialog>
 
-    <script type="module" src="/script.js?v=20260913_fix2"></script>
+    <script type="module" src="/script.js?v=20260924_scroll_anchor"></script>
 </body>
 </html>

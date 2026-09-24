@@ -1,8 +1,60 @@
-# Edge Reader — Firebase sürümü
+# Edge Reader — Firebase Cloud (Hosting) Sürümü
 
-Bu klasör Firebase Hosting üzerinde çalışan sürümdür. `save/edge-reader` yerel sunucu sürümüdür. Hosting yalnızca `public/` içeriğini yayınlar; `uploads/` ve `library.json` otomatik olarak buluta aktarılmaz. Kitapları bu sürümde hesabınıza giriş yaparak ekleyin. Aynı hesapla başka cihazdan açtığınızda Firestore kütüphanesi ve okuma konumu alınır.
+Bu klasör Firebase Hosting, Cloud Firestore ve Cloud Storage altyapısı üzerinde çalışan sunucusuz (serverless) bulut sürümüdür.
 
-## 13 Eylül 2026 incelemesi
+## Özellikler
+
+- **Bulut Senkronizasyonu:** Kullanıcı kimlik doğrulama (Firebase Auth) ile kişisel kütüphane ve okuma ilerlemesi (Firestore) tüm cihazlarda anlık eşitlenir.
+- **Range Streaming & Düşük Veri Tüketimi:** Kitapların tamamı tek seferde indirilmez; EPUB ve PDF dosyaları HTTP `Range` istekleriyle parça parça çekilir.
+- **Önceden Hesaplanmış Düzen (Layout Bundle):** EPUB yüklenirken görsel boyutları ve bölüm metinleri optimize edilmiş bir paket haline getirilir; ilk açılışta devasa resimler indirilmeden tam sayfa sayısı hesaplanabilir.
+- **Sayfa Sayfa ve Kaydırma Modları:** CSS Columns tabanlı çift yönlü sayfa çevirme ve akıcı dikey kaydırma modu.
+
+## Hızlı Kurulum
+
+### 1. Ön Gereksinimler
+
+- [Node.js](https://nodejs.org/) (v18 veya üstü)
+- [Firebase CLI](https://firebase.google.com/docs/cli) (`npm install -g firebase-tools`)
+- Firebase Konsolu'nda oluşturulmuş bir proje (Blaze / Pay-as-you-go planı Cloud Storage kullanımı için gereklidir)
+
+### 2. Proje Yapılandırması
+
+1. Firebase projenizi bağlayın:
+   `.firebaserc.example` dosyasını `.firebaserc` olarak kopyalayın ve proje ID'nizi girin:
+   ```bash
+   cp .firebaserc.example .firebaserc
+   ```
+   Veya doğrudan CLI ile seçin:
+   ```bash
+   firebase login
+   firebase use --add <PROJE_ID>
+   ```
+
+2. Web SDK konfigürasyonunu ekleyin:
+   `public/firebase-config.example.js` dosyasını `public/firebase-config.js` olarak kopyalayın ve Firebase Console > Project Settings > General > Your Apps altındaki bilgilerinizi yazın:
+   ```bash
+   cp public/firebase-config.example.js public/firebase-config.js
+   ```
+
+### 3. Yerel Test
+
+```bash
+firebase emulators:start --only hosting
+```
+Tarayıcınızda `http://localhost:5000` adresinden açabilirsiniz.
+
+### 4. Canlıya Dağıtım
+
+```bash
+firebase deploy --only "hosting,firestore:rules,storage"
+```
+
+### 5. Cloud Storage CORS Ayarları
+
+Storage üzerinden Range isteklerinin tarayıcıda sorunsuz çalışabilmesi için CORS kuralını uygulayın:
+```bash
+gcloud storage buckets update gs://<PROJE_ID>.firebasestorage.app --cors-file=storage.cors.json
+```
 
 Yerel Firebase yapılandırması ve açık konsol aynı `book-reader-upload` projesine, `book-reader-upload.firebasestorage.app` bucket'ına işaret ediyor. Bu uzantı yeni Firebase bucket'ları için doğrudur; `.appspot.com` ile değiştirmeyin.
 

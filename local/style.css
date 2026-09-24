@@ -680,86 +680,6 @@ select option {
     }
 }
 
-/* --- KİMLİK DOĞRULAMA (AUTH) --- */
-.auth-overlay {
-    position: fixed;
-    top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0, 0, 0, 0.8);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    z-index: 1000;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
-
-.auth-card {
-    padding: 40px;
-    width: 90%;
-    max-width: 400px;
-    text-align: center;
-}
-
-.auth-card h2 {
-    margin-bottom: 10px;
-    color: var(--ui-text);
-}
-
-.auth-card p {
-    color: var(--ui-text);
-    opacity: 0.8;
-    margin-bottom: 25px;
-}
-
-#auth-form {
-    display: flex;
-    flex-direction: column;
-    gap: 15px;
-}
-
-#auth-form input {
-    padding: 12px 15px;
-    border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    background: rgba(0, 0, 0, 0.2);
-    color: white;
-    font-family: inherit;
-    font-size: 1rem;
-}
-
-#auth-form input:focus {
-    outline: none;
-    border-color: var(--ui-primary);
-    box-shadow: 0 0 0 2px rgba(92, 107, 192, 0.3);
-}
-
-#auth-submit-btn {
-    margin-top: 10px;
-    width: 100%;
-    font-size: 1.1rem;
-}
-
-.auth-switch {
-    margin-top: 20px;
-    font-size: 0.9rem;
-}
-
-.auth-switch a {
-    color: var(--ui-primary);
-    text-decoration: none;
-    font-weight: 600;
-}
-
-.auth-error {
-    margin-top: 15px;
-    padding: 10px;
-    background: rgba(229, 57, 53, 0.2);
-    border: 1px solid #e53935;
-    color: #ff5252;
-    border-radius: 8px;
-    font-size: 0.9rem;
-}
-
 /* --- KÜTÜPHANE GÖRÜNÜMÜ --- */
 #library-view {
     display: none;
@@ -786,36 +706,6 @@ select option {
     font-size: 2rem;
     margin: 0;
 }
-
-.library-actions {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-}
-
-.user-email {
-    font-size: 0.9rem;
-    opacity: 0.8;
-    background: rgba(0,0,0,0.2);
-    padding: 8px 12px;
-    border-radius: 20px;
-}
-
-@media (max-width: 768px) {
-    .library-header {
-        flex-direction: column;
-        gap: 15px;
-    }
-    .library-actions {
-        flex-wrap: wrap;
-        justify-content: center;
-    }
-    .user-email {
-        width: 100%;
-        text-align: center;
-    }
-}
-
 
 .library-grid {
     display: grid;
@@ -852,6 +742,10 @@ select option {
     align-items: center;
     color: #666;
     font-size: 3rem;
+}
+
+img.book-cover {
+    object-fit: cover;
 }
 
 .book-info {
@@ -910,10 +804,20 @@ select option {
     align-items: center;
     opacity: 0;
     transition: opacity 0.2s;
+    border: 0;
+    cursor: pointer;
+    z-index: 1;
 }
 
-.book-card:hover .delete-book-icon {
+.book-card:hover .delete-book-icon,
+.delete-book-icon:focus-visible {
     opacity: 1;
+}
+
+@media (hover: none) {
+    .delete-book-icon {
+        opacity: 1;
+    }
 }
 
 /* --- YÜKLEME EKRANI (OVERLAY) --- */

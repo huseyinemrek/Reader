@@ -1,0 +1,25 @@
+# Logs & debug
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+firebase-debug.log*
+firebase-debug.*.log*
+
+# Firebase cache
+.firebase/
+
+# Firebase credentials & project binding
+.firebaserc
+public/firebase-config.js
+!public/firebase-config.example.js
+!.firebaserc.example
+
+# Runtime & Dependencies
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.*

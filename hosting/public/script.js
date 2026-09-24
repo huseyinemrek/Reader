@@ -30,6 +30,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let sessionAbort = new AbortController();
     let paginationAbort = new AbortController();
     let paginationPromise = Promise.resolve();
+    let paginationFailed = false;
+    const paginationFailureMessage = 'Sayfa sayısı hesaplanamadı. Bağlantıyı kontrol edip kitabı yeniden açın.';
     let layoutKey = '';
     let layoutTimer = null;
     let layoutPosition = null;
@@ -108,6 +110,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const pagedPageText = document.getElementById('paged-page-text');
     const modeScrollBtn = document.getElementById('mode-scroll-btn');
     const modePagedBtn = document.getElementById('mode-paged-btn');
+    const originalPdfSetting = document.getElementById('original-pdf-setting');
+    const openOriginalPdf = document.getElementById('open-original-pdf');
+
     const openPageJumpBtn = document.getElementById('open-page-jump');
     const pageJumpModal = document.getElementById('page-jump-modal');
     const pageJumpClose = document.getElementById('page-jump-close');
@@ -439,25 +444,48 @@ document.addEventListener('DOMContentLoaded', () => {
         books.forEach(book => {
             const card = document.createElement('div');
             card.className = 'book-card';
+            if (book.coverUrl) {
+                const cover = document.createElement('img');
+                cover.className = 'book-cover';
+                cover.src = book.coverUrl;
+                cover.alt = '';
+                cover.loading = 'lazy';
+                card.appendChild(cover);
+            } else {
+                const placeholder = document.createElement('div');
+                placeholder.className = 'book-cover';
+                placeholder.innerHTML = '<i class="fa-solid fa-book" aria-hidden="true"></i>';
+                card.appendChild(placeholder);
+            }
 
-            const coverHtml = book.coverUrl 
-                ? `<img src="${book.coverUrl}" class="book-cover" alt="${book.title}">` 
-                : `<div class="book-cover" style="display:flex; align-items:center; justify-content:center; background:#222; color:#555;"><i class="fa-solid fa-book" style="font-size:3rem;"></i></div>`;
+            const info = document.createElement('div');
+            info.className = 'book-info';
+            const title = document.createElement('div');
+            title.className = 'book-title';
+            title.textContent = book.title;
+            title.title = book.title;
+            const progress = document.createElement('div');
+            progress.className = 'book-progress-text';
+            const percent = Math.max(0, Math.min(100, Math.round(Number(book.progress) || 0)));
+            progress.textContent = `%${percent} okundu`;
+            const track = document.createElement('div');
+            track.className = 'book-progress-track';
+            const fill = document.createElement('div');
+            fill.className = 'book-progress-fill';
+            fill.style.width = percent + '%';
+            track.appendChild(fill);
+            info.append(title, progress, track);
+            card.appendChild(info);
 
-            const percent = book.progress ? Math.round(book.progress) : 0;
-
-            card.innerHTML = `
-                ${coverHtml}
-                <div class="book-info">
-                    <div class="book-title" title="${book.title}">${book.title}</div>
-                    <div class="book-progress">%${percent} okundu</div>
-                </div>
-                <button class="delete-btn" title="Kitabı Sil"><i class="fa-solid fa-trash"></i></button>
-            `;
-
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'delete-book-icon';
+            deleteBtn.title = 'Kitabı Sil';
+            deleteBtn.setAttribute('aria-label', `${book.title} kitabını sil`);
+            deleteBtn.innerHTML = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
+            card.appendChild(deleteBtn);
             card.onclick = () => openBook(book.id);
 
-            const deleteBtn = card.querySelector('.delete-btn');
             deleteBtn.onclick = async (e) => {
                 e.stopPropagation();
                 if (confirm(`"${book.title}" kitabını silmek istediğinize emin misiniz?`)) {
@@ -512,6 +540,9 @@ document.addEventListener('DOMContentLoaded', () => {
         currentPdfDoc = null;
         currentBookId = null;
         currentBookType = null;
+        if (originalPdfSetting) originalPdfSetting.hidden = true;
+        openOriginalPdf?.removeAttribute('href');
+
         epubSpine = [];
         stylesheetCache.clear();
         htmlSource = '';
@@ -519,6 +550,8 @@ document.addEventListener('DOMContentLoaded', () => {
         currentChapterIndex = localPagedIndex = 0;
         currentGlobalPage = currentPdfPage = 1;
         totalBookPages = totalPdfPages = 0;
+        paginationFailed = false;
+        pagedIndicator.style.display = '';
         isNavigatingPage = scrollWindowBusy = false;
         layoutKey = '';
         layoutPosition = null;
@@ -588,16 +621,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const missing = epubSpine.filter(chapter => chapter.missing).length;
         const warning = missing ? missing + ' bölüm EPUB dosyasında eksik. Toplam yalnızca mevcut içeriği kapsar.' : '';
-        pagedIndicator.title = warning || 'Sayfaya Git (G)';
+        pagedIndicator.title = paginationFailed ? paginationFailureMessage : warning || 'Sayfaya Git (G)';
+        pagedIndicator.style.display = paginationFailed ? 'block' : '';
         pagedPageText.textContent = ready
-            ? 'Sayfa ' + currentGlobalPage + ' / ' + totalBookPages + (missing ? ' · eksik EPUB' : '') : 'Sayfalar hesaplanıyor…';
+            ? 'Sayfa ' + currentGlobalPage + ' / ' + totalBookPages + (missing ? ' · eksik EPUB' : '')
+            : paginationFailed ? 'Sayfa sayısı hesaplanamadı' : 'Sayfalar hesaplanıyor…';
         progressBar.style.width = ready ? (100 * currentGlobalPage / totalBookPages) + '%' : '0%';
         pageJumpInput.disabled = pageJumpSlider.disabled = pageJumpSubmit.disabled = !ready || isNavigatingPage;
         jumpTotalPages.textContent = ready ? totalBookPages : '…';
         pageJumpInput.max = pageJumpSlider.max = Math.max(1, totalBookPages);
-        pagedPrevBtn.disabled = isNavigatingPage || (currentChapterIndex === 0 && localPagedIndex === 0 && currentPdfPage === 1);
-        pagedNextBtn.disabled = isNavigatingPage || (ready && currentGlobalPage >= totalBookPages);
-        if (pageJumpModal.open) document.getElementById('page-jump-status').textContent = warning;
+        pagedPrevBtn.disabled = isNavigatingPage || paginationFailed || (currentChapterIndex === 0 && localPagedIndex === 0 && currentPdfPage === 1);
+        pagedNextBtn.disabled = isNavigatingPage || paginationFailed || (ready && currentGlobalPage >= totalBookPages);
     }
 
     function updateLocation() {
@@ -687,6 +721,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const token = session;
         layoutKey = getLayoutKey();
         const key = layoutKey;
+        paginationFailed = false;
         totalBookPages = currentBookType === 'pdf' ? totalPdfPages : 0;
         updatePagedIndicator();
         if (!currentBookId || currentBookType === 'pdf') return;
@@ -769,13 +804,13 @@ document.addEventListener('DOMContentLoaded', () => {
     function startPagination() {
         const token = session;
         const key = getLayoutKey();
+        const work = countBookPages();
         const currentSignal = paginationAbort.signal;
-        paginationPromise = countBookPages();
-        paginationPromise.catch(error => {
+        paginationPromise = work.catch(error => {
             if (currentSignal.aborted || token !== session || key !== getLayoutKey() || error.name === 'AbortError') return;
             console.error(error);
-            pagedPageText.textContent = 'Sayfa sayısı hesaplanamadı';
-            document.getElementById('page-jump-status').textContent = 'Sayfa sayısı hesaplanamadı. Kitabı yeniden açın.';
+            paginationFailed = true;
+            updatePagedIndicator();
         });
         return paginationPromise;
     }
@@ -883,29 +918,36 @@ document.addEventListener('DOMContentLoaded', () => {
             if (isEpub) currentChapterIndex = index;
             else currentPdfPage = currentGlobalPage = index + 1;
             const length = isEpub ? epubSpine.length : totalPdfPages;
-            for (let i = Math.max(0, index - 1); i <= Math.min(length - 1, index + 1); i++) {
-                let existing = bookContent.querySelector(':scope > section[data-index="' + i + '"]');
-                if (existing && existing.dataset.loaded === 'true') continue;
-                let fresh;
-                if (isEpub) fresh = await loadEpubChapter(i);
-                else {
-                    const wrapper = document.createElement('div');
-                    wrapper.innerHTML = await getPdfPageHtml(i + 1);
-                    fresh = wrapper.firstElementChild;
+            const start = Math.max(0, index - 1);
+            let end = Math.min(length - 1, index + 1);
+            for (let i = start; i <= end; i++) {
+                let section = bookContent.querySelector(':scope > section[data-index="' + i + '"]');
+                if (!section || section.dataset.loaded !== 'true') {
+                    let fresh;
+                    if (isEpub) fresh = await loadEpubChapter(i);
+                    else {
+                        const wrapper = document.createElement('div');
+                        wrapper.innerHTML = await getPdfPageHtml(i + 1);
+                        fresh = wrapper.firstElementChild;
+                    }
+                    if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll') return;
+                    const anchor = active.getBoundingClientRect().top;
+                    if (section) section.replaceWith(fresh);
+                    else {
+                        const after = Array.from(bookContent.children).find(el => Number(el.dataset.index) > i);
+                        bookContent.insertBefore(fresh, after || null);
+                    }
+                    section = fresh;
+                    if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - anchor, behavior: 'instant'});
+                    await settleContent(section);
+                    if (token !== session || location !== locationVersion) return;
                 }
-                if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll') return;
-                const anchor = active.getBoundingClientRect().top;
-                if (existing) existing.replaceWith(fresh);
-                else {
-                    const after = Array.from(bookContent.children).find(el => Number(el.dataset.index) > i);
-                    bookContent.insertBefore(fresh, after || null);
-                }
-                await settleContent(fresh);
-                if (token !== session || location !== locationVersion) return;
-                if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - anchor, behavior: 'instant'});
+                // Short sections at the viewport end need a following chapter to leave room to scroll.
+                if (i === end && end < length - 1 && section.getBoundingClientRect().bottom < innerHeight + 200) end++;
             }
             for (const element of bookContent.children) {
-                if (Math.abs(Number(element.dataset.index) - index) <= 1 || element.dataset.loaded !== 'true') continue;
+                const elementIndex = Number(element.dataset.index);
+                if ((elementIndex >= start && elementIndex <= end) || element.dataset.loaded !== 'true') continue;
                 const height = element.getBoundingClientRect().height;
                 if (ttsActive) stopTTS();
                 element.replaceChildren();
@@ -939,8 +981,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!currentBookId) return;
         updatePagedIndicator();
         pageJumpInput.value = pageJumpSlider.value = currentGlobalPage;
-        document.getElementById('page-jump-status').textContent = totalBookPages
-            ? (epubSpine.some(ch => ch.missing) ? pagedIndicator.title : '') : 'Sayfa numaraları hesaplanıyor…';
+        document.getElementById('page-jump-status').textContent = paginationFailed
+            ? paginationFailureMessage : totalBookPages
+                ? (epubSpine.some(ch => ch.missing) ? pagedIndicator.title : '') : 'Sayfa numaraları hesaplanıyor…';
         if (!pageJumpModal.open) pageJumpModal.showModal();
         pageJumpInput.focus();
         pageJumpInput.select();
@@ -1006,6 +1049,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const token = session;
         paginationAbort.abort();
         totalBookPages = 0;
+        paginationFailed = false;
         updatePagedIndicator();
         clearTimeout(layoutTimer);
         layoutTimer = setTimeout(async () => {
@@ -1014,7 +1058,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (token !== session) return;
                 const position = layoutPosition;
                 layoutPosition = null;
-                if (position && currentBookId) {
+                if (position && currentBookId && totalBookPages > 0) {
                     const count = currentBookType === 'epub' ? epubSpine[currentChapterIndex].pageCount : totalBookPages;
                     await navigate(() => showLocation(currentChapterIndex, Math.min(count - 1, Math.floor(position.scrollRatio * count)), position.scrollRatio));
                 }
@@ -1064,6 +1108,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (token !== session) return;
+            if (originalPdfSetting) originalPdfSetting.hidden = currentBookType !== 'pdf';
+            if (currentBookType === 'pdf' && openOriginalPdf) openOriginalPdf.href = book.bookUrl;
+
             libraryView.classList.remove('active');
             libraryView.style.display = 'none';
             readerView.style.display = 'block';
@@ -1083,10 +1130,10 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             await startPagination();
             if (token !== session) return;
-            if (params.has('page') && !params.has('ch')) {
+            if (totalBookPages > 0 && params.has('page') && !params.has('ch')) {
                 await goToPage(Math.max(1, Math.min(totalBookPages, Number(params.get('page')) || 1)));
             } else {
-                if (saved && saved.layoutKey !== layoutKey && !params.has('local')) {
+                if (totalBookPages > 0 && saved && saved.layoutKey !== layoutKey && !params.has('local')) {
                     const count = currentBookType === 'epub' ? epubSpine[chapter].pageCount : totalBookPages;
                     await navigate(() => showLocation(chapter, Math.min(count - 1, Math.floor(saved.scrollRatio * count)), saved.scrollRatio));
                 }

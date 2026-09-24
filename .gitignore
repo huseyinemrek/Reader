@@ -3,22 +3,39 @@ node_modules/
 **/node_modules/**
 package-lock.json
 
-# Books / Uploads (large binary files)
+# Environment & Sensitive Configs
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Firebase Project Credentials
+.firebaserc
+**/.firebaserc
+!**/.firebaserc.example
+**/firebase-config.js
+!**/firebase-config.example.js
+
+# Books / Uploads / Databases (local personal data)
 uploads/
 **/uploads/**
+library.json
+**/library.json
+!**/library.example.json
 *.epub
 *.pdf
+*.zip
+*.htmlz
 
 # Firebase cache / logs
 .firebase/
 *-debug.log
 *.log
 
-# Large images / screenshots in root
+# Large images / screenshots
 *.png
-
-# Local archive / offline server (kept local only)
-save/
 
 # OS / Editor
 .DS_Store

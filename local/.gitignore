@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local Database & Uploads
+uploads/
+library.json
+!library.example.json
+
+# Logs
+*.log

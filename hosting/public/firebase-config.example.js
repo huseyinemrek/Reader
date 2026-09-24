@@ -4,18 +4,19 @@ import { getAuth } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 import { getStorage } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-storage.js";
 
-// TODO: AŞAĞIDAKİ OBJEYİ KENDİ FİREBASE PROJENİZİN "firebaseConfig" OBJESİ İLE DEĞİŞTİRİN
+// TODO: Aşağıdaki nesneyi kendi Firebase projenizin "firebaseConfig" bilgileriyle değiştirin:
+// Firebase Console > Project Settings > General > Your apps > Web app > SDK setup and configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyD1FLYydwyTkmqOHm3SCH74UEHiAK5KE3s",
-  authDomain: "book-reader-upload.firebaseapp.com",
-  projectId: "book-reader-upload",
-  storageBucket: "book-reader-upload.firebasestorage.app",
-  messagingSenderId: "136369190426",
-  appId: "1:136369190426:web:24901de4547ade9f2d83a3",
-  measurementId: "G-131K3T7D1R"
+  apiKey: "YOUR_FIREBASE_API_KEY",
+  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT_ID.firebasestorage.app",
+  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+  appId: "YOUR_APP_ID",
+  measurementId: "YOUR_MEASUREMENT_ID"
 };
 
-// Firebase'i Başlat (Eğer konfigürasyon boşsa hata fırlatmaması için küçük bir kontrol)
+// Firebase'i Başlat
 let app, auth, db, storage;
 
 try {
