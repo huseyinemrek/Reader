@@ -1,4 +1,4 @@
-# 📖 Premium Edge Reader
+# 📖 Reader
 
 Modern, hızlı ve tarayıcı tabanlı EPUB, PDF ve HTML kitap okuyucu. Özellikle **Microsoft Edge "Sesli Oku" (Read Aloud)** ve dahili Text-to-Speech (TTS) motorlarıyla kusursuz uyum sağlayacak şekilde tasarlanmıştır.
 
