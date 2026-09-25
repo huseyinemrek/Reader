@@ -131,6 +131,7 @@ body {
     font-family: var(--font-family);
     font-size: var(--font-size) !important;
     line-height: var(--line-height);
+    text-align: start;
     transition: background-color 0.4s ease, color 0.4s ease;
 }
 
@@ -177,9 +178,9 @@ body {
     margin: 30px 0;
 }
 
+
 #book-content p {
     margin-bottom: var(--paragraph-spacing);
-    text-align: justify;
 }
 
 #book-content h1,

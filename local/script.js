@@ -1134,7 +1134,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         let css = '';
         for (const style of doc.querySelectorAll('style')) {
-            css += fixChapterCss(style.textContent, chapter.url);
+            css += await fixChapterCss(style.textContent, chapter.url, signal);
             style.remove();
         }
         for (const link of doc.querySelectorAll('link[rel="stylesheet"]')) {
@@ -1145,7 +1145,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 signal.throwIfAborted();
                 stylesheetCache.set(url, text);
             }
-            css += fixChapterCss(text, url);
+            css += await fixChapterCss(text, url, signal);
         }
         doc.querySelectorAll('script,iframe,object,embed,base,link,form').forEach(el => el.remove());
         for (const el of doc.body.querySelectorAll('*')) {
@@ -1154,6 +1154,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (el.hasAttribute('style')) {
                 el.style.color = el.style.backgroundColor = el.style.background = '';
+                normalizeChapterStyle(el.style);
                 el.setAttribute('style', fixCssUrls(el.getAttribute('style'), chapter.url));
             }
             for (const name of ['src', 'href', 'xlink:href', 'poster']) {
@@ -1180,19 +1181,98 @@ document.addEventListener('DOMContentLoaded', () => {
         return css.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_, quote, url) => 'url("' + resolveResource(url, base).replace(/"/g, '%22') + '")');
     }
 
-    function fixChapterCss(css, base) {
-        return fixCssUrls(css, base).replace(/@namespace[^;]+;/gi, '')
-            .replace(/@page\s*\{[^}]*\}/gi, '')
-            .replace(/(?:^|[;{])\s*(?:color|background-color|background)\s*:[^;}]+;?/gi, match => match[0] === '{' ? '{' : ';')
-            .replace(/font-size\s*:\s*([^;]+(px|pt)|small|medium|large|x-large)[^;}]*;?/gi, '')
-            .replace(/(^|[^\w-])(body|html)(?=[^\w-]|$)/gi, '$1.epub-chapter');
+    const absoluteFontSizeRatios = {
+        'xx-small': 0.5625,
+        'x-small': 0.625,
+        small: 0.8125,
+        medium: 1,
+        large: 1.125,
+        'x-large': 1.5,
+        'xx-large': 2,
+        'xxx-large': 3
+    };
+
+    function normalizeFontSize(value) {
+        const normalized = value.trim().toLowerCase();
+        let ratio;
+        if (Object.prototype.hasOwnProperty.call(absoluteFontSizeRatios, normalized)) {
+            ratio = absoluteFontSizeRatios[normalized];
+        } else {
+            const match = /^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(px|pt|rem)$/i.exec(normalized);
+            if (!match) return value;
+            const size = Number(match[1]);
+            ratio = match[2].toLowerCase() === 'px' ? size / 16
+                : match[2].toLowerCase() === 'pt' ? size / 12 : size;
+        }
+        return 'calc(var(--font-size) * ' + Number(ratio.toPrecision(8)) + ')';
     }
+
+    function normalizeChapterStyle(style) {
+        for (let index = 0; index < style.length; index++) {
+            const property = style.item(index);
+            const value = style.getPropertyValue(property);
+            if (property.toLowerCase() === 'font-size') {
+                const normalized = normalizeFontSize(value);
+                if (normalized !== value) style.setProperty(property, normalized, style.getPropertyPriority(property));
+            } else if (property.toLowerCase() === 'text-align' && value.trim().toLowerCase() === 'justify') {
+                style.setProperty(property, 'start', style.getPropertyPriority(property));
+            }
+        }
+    }
+
+    async function fixChapterCss(css, base, signal, seen = new Set()) {
+        if (seen.has(base)) return '';
+        seen = new Set([...seen, base]);
+        const imports = [...css.matchAll(/@import\s+(?:url\(\s*)?['"]([^'"]+)['"]\s*\)?[^;]*;/gi)];
+        for (const match of imports) {
+            const url = resolveResource(match[1], base);
+            let imported = '';
+            if (url && new URL(url).origin === location.origin) {
+                try {
+                    let text = stylesheetCache.get(url);
+                    if (text === undefined) {
+                        text = await fetchText(url, signal);
+                        signal.throwIfAborted();
+                        stylesheetCache.set(url, text);
+                    }
+                    imported = await fixChapterCss(text, url, signal, seen);
+                } catch (error) {
+                    signal.throwIfAborted();
+                    console.warn('EPUB stylesheet could not be loaded:', url, error);
+                }
+            }
+            css = css.replace(match[0], imported);
+        }
+        css = css.replace(/@import[^;]*;/gi, '').replace(/@namespace[^;]+;/gi, '');
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(fixCssUrls(css, base));
+        normalizeChapterRules(sheet.cssRules);
+        return Array.from(sheet.cssRules)
+            .filter(rule => rule.type !== CSSRule.PAGE_RULE && rule.type !== CSSRule.NAMESPACE_RULE)
+            .map(rule => rule.cssText)
+            .join('\n');
+    }
+
+    function normalizeChapterRules(rules) {
+        for (let index = rules.length - 1; index >= 0; index--) {
+            const rule = rules[index];
+            if (rule.style) normalizeChapterStyle(rule.style);
+            if (rule.type === 1) {
+                rule.selectorText = rule.selectorText.replace(/(^|[^\w-])(body|html)(?=[^\w-]|$)/gi, '$1.epub-chapter');
+            }
+            if (rule.cssRules) normalizeChapterRules(rule.cssRules);
+        }
+    }
+
 
     function makeHtmlSection(doc) {
         const section = doc.createElement('section');
         section.className = 'epub-chapter';
         section.dataset.index = '0';
         section.innerHTML = htmlSource;
+        for (const element of section.querySelectorAll('[style]')) {
+            normalizeChapterStyle(element.style);
+        }
         return section;
     }
 

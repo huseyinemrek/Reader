@@ -109,6 +109,59 @@ export async function createBookResources(book, { uid, signal }) {
         }
         return css;
     }
+
+    const absoluteFontSizes = {
+        'xx-small': 0.5625, 'x-small': 0.625, small: 0.8125, medium: 1,
+        large: 1.125, 'x-large': 1.5, 'xx-large': 2, 'xxx-large': 3
+    };
+
+    function normalizeFontSize(value) {
+        const keyword = value.trim().toLowerCase();
+        if (Object.hasOwn(absoluteFontSizes, keyword)) {
+            return `calc(var(--font-size) * ${absoluteFontSizes[keyword]})`;
+        }
+        return value.replace(/([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*(px|pt|rem)(?![\w-])/gi, (match, amount, unit) => {
+            const scale = unit.toLowerCase() === 'pt' ? 1 / 12 : unit.toLowerCase() === 'rem' ? 1 : 1 / 16;
+            const ratio = Number(amount) * scale;
+            return Number.isFinite(ratio) ? `calc(var(--font-size) * ${Number(ratio.toFixed(6))})` : match;
+        });
+    }
+
+    function normalizedCss(css) {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(css);
+        function serialize(rules) {
+            const output = [];
+            for (const rule of rules) {
+                if (rule.type === CSSRule.PAGE_RULE) continue;
+                const style = rule.style;
+                if (style) {
+                    for (const property of ['color', 'background-color', 'background']) style.removeProperty(property);
+                    const size = style.getPropertyValue('font-size');
+                    if (size) style.setProperty('font-size', normalizeFontSize(size), style.getPropertyPriority('font-size'));
+                    if (style.getPropertyValue('text-align').trim().toLowerCase() === 'justify') {
+                        style.setProperty('text-align', 'start', style.getPropertyPriority('text-align'));
+                    }
+                }
+                if (typeof rule.selectorText === 'string') {
+                    rule.selectorText = rule.selectorText.replace(/(^|[^\w-])(body|html)(?=[^\w-]|$)/gi, '$1.epub-chapter');
+                }
+                if (rule.cssRules) serialize(rule.cssRules);
+                output.push(rule.cssText);
+            }
+            return output.join('\n');
+        }
+        return serialize(sheet.cssRules);
+    }
+
+    function normalizeInlineStyle(style) {
+        const size = style.getPropertyValue('font-size');
+        if (size) style.setProperty('font-size', normalizeFontSize(size), style.getPropertyPriority('font-size'));
+        if (style.getPropertyValue('text-align').trim().toLowerCase() === 'justify') {
+            style.setProperty('text-align', 'start', style.getPropertyPriority('text-align'));
+        }
+    }
+
     async function cssText(css, base, seen = new Set()) {
         if (seen.has(base)) return '';
         seen = new Set([...seen, base]);
@@ -120,13 +173,8 @@ export async function createBookResources(book, { uid, signal }) {
             const imported = pathOf(url) === null ? '' : await cssText(await text(url), url, seen);
             css = css.replace(match[0], imported);
         }
-        css = css.replace(/@import[^;]*;/gi, '');
-        // Keep the existing reader's typography/theme normalization.
-        css = css.replace(/@namespace[^;]+;/gi, '').replace(/@page\s*\{[^}]*\}/gi, '')
-            .replace(/(?:^|[;{])\s*(?:color|background-color|background)\s*:[^;}]+;?/gi, m => m[0] === '{' ? '{' : ';')
-            .replace(/font-size\s*:\s*([^;]+(px|pt)|small|medium|large|x-large)[^;}]*;?/gi, '')
-            .replace(/(^|[^\w-])(body|html)(?=[^\w-]|$)/gi, '$1.epub-chapter');
-        return cssUrls(css, base);
+        css = css.replace(/@import[^;]*;/gi, '').replace(/@namespace[^;]+;/gi, '');
+        return cssUrls(normalizedCss(css), base);
     }
     async function section(html, base, targetDocument, chapterIndex = 0, id = '') {
         const parsed = new DOMParser().parseFromString(html, 'text/html');
@@ -151,7 +199,8 @@ export async function createBookResources(book, { uid, signal }) {
             element.removeAttribute('ping');
             if (element.hasAttribute('style')) {
                 element.style.color = element.style.backgroundColor = element.style.background = '';
-                element.setAttribute('style', await cssUrls(element.getAttribute('style'), base));
+                normalizeInlineStyle(element.style);
+                element.setAttribute('style', await cssUrls(element.style.cssText, base));
             }
             const isImage = ['img', 'image'].includes(element.localName);
             if (isImage) {

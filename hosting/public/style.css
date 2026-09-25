@@ -130,6 +130,7 @@ body {
 
     font-family: var(--font-family);
     font-size: var(--font-size) !important;
+    text-align: start;
     line-height: var(--line-height);
     transition: background-color 0.4s ease, color 0.4s ease;
 }
@@ -179,7 +180,6 @@ body {
 
 #book-content p {
     margin-bottom: var(--paragraph-spacing);
-    text-align: justify;
 }
 
 #book-content h1,
