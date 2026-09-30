@@ -10,60 +10,84 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
 - **Sayfa Sayfa ve Kaydırma Modları:** CSS Column tabanlı yatay sayfa modu ve dinamik bölüm pencereli dikey kaydırma modu.
 - **EPUB, PDF, HTML Desteği:** Kitap içi arama, sayfa atlama (G kısayolu), metin boyutu, yazı tipi ve tema özelleştirmeleri.
 - **Edge Sesli Okuma (TTS):** Cümle düzeyinde vurgulama ve hız ayarı.
-- **Yerel PDF OCR:** Tesseract ile İngilizce ve Türkçe taranmış sayfalardan metin çıkarma; grafik ve resimleri tam sayfa görselinde koruma.
+- **Yerel PDF OCR:** GLM-OCR ile bölge bazında metin ve LaTeX tanıma; PP-DocLayoutV3 ile başlık, paragraf, algoritma, formül ve görsel yapısının çıkarılması.
 
 ## Gereksinimler
 
 - [Node.js](https://nodejs.org/) (22.13+ sürümünün 22.x dalı veya 24+; Node.js 24 LTS önerilir)
 - npm
+- OCR için [uv](https://docs.astral.sh/uv/getting-started/installation/); kurulum komutu ayrı bir Python 3.12 ortamı oluşturur.
+- Hızlı OCR için BF16 destekli NVIDIA GPU ve güncel sürücü. CPU yolu da vardır; büyük sayfalar daha yavaştır.
 
 ## Kurulum ve Çalıştırma
 
-1. Bağımlılıkları yükleyin:
+1. Node.js bağımlılıklarını yükleyin:
    ```bash
    npm install
    ```
 
-2. (İsteğe bağlı) Ortam değişkenlerini ayarlayın:
-   Varsayılan port `3000`'dir. Farklı bir port kullanmak isterseniz `.env.example` dosyasını `.env` olarak kopyalayıp portu belirleyebilirsiniz:
+2. PDF OCR kullanacaksanız ortamı ve sabit sürümlü modelleri hazırlayın:
    ```bash
-   cp .env.example .env
+   npm run ocr:setup
    ```
+   Python ortamı `local/.venv-ocr/` altına kurulur; CUDA 12.8 destekli PyTorch paketleri kendi çalışma zamanı kitaplıklarını içerir. Ayrı CUDA Toolkit kurulumu gerekmez. İlk kurulum internet ve model indirmeleri için disk alanı gerektirir.
 
-3. Sunucuyu başlatın:
+3. (İsteğe bağlı) `.env.example` dosyasını `.env` olarak kopyalayın. `PORT` ve `OCR_DEVICE` ayarlarını değiştirebilirsiniz.
+
+4. Sunucuyu başlatın:
    ```bash
    npm start
    ```
 
-4. Tarayıcınızda açın:
+5. Tarayıcınızda açın:
    - Bilgisayarınızdan: `http://localhost:3000`
    - Telefon veya tabletinizden: Konsolda gösterilen yerel IP adresi (örn. `http://192.168.1.X:3000`)
 
 ## PDF ve OCR
 
-PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Sayfa açıldığında yerel sunucu PDF.js ile tüm sayfayı JPEG olarak çizer; taranmış resimler ve vektör grafikler bu görselde korunur. Grafikler ayrı kırpılmış dosyalar olarak değil, orijinal sayfanın içinde gösterilir. Orijinal görsel solda, seçilebilir metin sağda gösterilir; dar ekranlarda alt alta geçmek yerine karşılaştırma alanı yatay kaydırılır. Metin uygulamanın sesli okuma akışında kullanılabilir.
+PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Orijinal sayfa tarayıcıda PDF.js ile doğrudan PDF kaynağından çizilir; OCR sonucunu beklemez. Yakınlaştırma düğmeleriyle %500'e kadar büyütebilir, sayfaya sığdırabilir ve görüntüyü kaydırabilirsiniz. Görünen alan cihaz piksel oranında yeniden çizilir; her çizim parçası en fazla 1024 × 1024 fiziksel pikseldir. Kaynak PDF taranmış bir fotoğrafsa renderer kaybolmuş ayrıntıları geri getiremez. Seçilebilir metin sağda hazırlanır; dar ekranlarda karşılaştırma alanı yatay kaydırılır.
 
-En az 200 harf/rakam içeren, bozuk karakter barındırmayan PDF metni doğrudan kullanılır. Metin yoksa veya yalnızca kısa grafik etiketleri varsa Tesseract (`eng+tur`) otomatik çalışır. Kısmen okunabilen bir sayfada eksik metin varsa **Bu sayfayı OCR ile oku** düğmesi yerel metin yerine OCR sonucunu kullanır.
+En az 200 harf/rakam içeren, bozuk karakter barındırmayan PDF metni doğrudan kullanılır. Metin yoksa veya yalnızca kısa grafik etiketleri varsa yerel belge OCR hattı çalışır. **Bu sayfayı OCR ile oku** düğmesi mevcut sonucu atlayarak sayfayı yeniden işler; değişmemiş bölge görüntüleri model önbelleğinden kullanılabilir.
 
-Metin görseldeki paragraf bloklarına göre aktarılır: satır sonları yeniden akıtılır, paragraf girintileri ve boşlukları ayrı paragrafları belirler, sayfa altındaki numara ayrı tutulur. PDF metin katmanında gerçek font ölçüleri, OCR'de ise ölçülen harf geometrisi kullanılarak ana metne göre font boyutu oranları saklanır. Sabit başlık boyutları verilmez; küçük açıklamalar da kendi oranlarıyla gösterilir. Okuyucunun font boyutunu değiştirince oranlar korunur.
+### Yapı önce, uygun büyüklükte pencereler sonra
 
-OCR harf kutuları kesin font metrikleri değildir. Aynı paragraftaki bir piksellik ölçüm farkları birleştirilir; tek şüpheli harf ölçümü bir kelimeyi büyütmez. Taranmış sayfalarda font oranları tahminidir, özellikle grafik içi metin ve matematik sembolleri hatalı ölçülebilir.
+1. PP-DocLayoutV3 genel sayfa yapısını ve kaynak koordinatlarını çıkarır; bu aşamada bütün sayfanın metni tek bir GLM çağrısıyla okunmaz.
+2. **Tüm metinler** — başlıklar, paragraflar, açıklamalar ve algoritma satırları — kendi kaynak çerçevelerinden okunur. Uzun bloklar ve algoritmalar boş kaynak satırlarından bölünür; harf veya alt/üst indis üzerinden kesilmez. Algoritma içindeki metin ve formül bölgeleri ayrıca sınıflandırılır.
+3. Her pencere PDF kaynağından yeniden çizilir. Kaynak mürekkep satırlarının yüksekliği yakınlaştırmayı belirler; metinde yaklaşık 48, formülde 64 piksel hedeflenir. Yakınlaştırma en fazla 4 kattır; beyaz bağlam dahil pencere 1,6 milyon pikseli ve 2400 piksellik kenarı aşmaz. Komşu çerçevenin mürekkebi beyaz kenarlığa taşınmaz. Taranmış PDF'de bu işlem fotoğrafta bulunmayan ayrıntı üretmez.
+4. GLM-OCR aynı kalıcı süreçte `Text Recognition:` ve `Formula Recognition:` görevleriyle parçaları okur. En fazla dört pencere birlikte işlenir; aynı görüntü/görev/model sonucu sınırlı bölge önbelleğinden kullanılır.
+5. Paragraf içindeki küçük formül pencereleri ayrı LaTeX çağrılarıyla okunur. Sonuç ancak özgün metindeki matematik aralığıyla güvenli eşleşiyorsa o konuma yerleştirilir; noktalama ve çevredeki metin korunur. Belirsiz eşleşmede sembol veya konum tahmin edilmez; mevcut paragraf korunur ve arayüzde kaynak karşılaştırma uyarısı gösterilir.
 
-- OCR bilgisayarınızdaki Node.js sunucusunda çalışır; telefon veya başka bir istemcide ek kurulum gerekmez.
-- Dil modelleri `npm install` sırasında kurulur. PDF işleme sırasında buluta dosya gönderilmez ve model indirme gereksinimi yoktur; ayrıca Tesseract uygulaması kurmanız gerekmez.
-- Sayfalar ihtiyaç oldukça işlenir. Tek işlem kuyruğu CPU kullanımını sınırlar; ilk açılış sonraki açılışlardan daha yavaş olabilir.
-- Metin ve görseller `uploads/pdf/<kitap-id>/` altında saklanır, sunucu yeniden başladıktan sonra yeniden kullanılır. Kitap silinince ilgili önbellek de silinir.
-- `GET /api/books/:id/pdf/pages/:page` metni, paragraf bloklarını (`blocks`: `text`, `bbox`, `runs` içindeki `text`/`fontScale`), kaynağı (`native`/`ocr`), OCR güven skorunu ve görsel adresini döndürür. `?ocr=1` yerel PDF metni yerine OCR kullanılmasını sağlar; mevcut OCR sonucu tekrar kullanılır.
-- OCR kusursuz değildir: formüller, küçük grafik etiketleri ve boşluklar hatalı tanınabilir. Güven skoru doğruluk yüzdesi değildir; orijinal sayfa görselini esas alın.
+Metin, satır içi matematik, numaralı denklemler ve algoritma satırları ayrı seçilebilir öğelerdir. LaTeX KaTeX ile çizilir ve kopyalanabilir; denklem karakterleri sesli okuma metnine eklenmez. Grafik ve tablolar kaynak görüntü olarak korunur; tablo hücrelerini semantik HTML'ye dönüştürme desteği yoktur. PDF metin katmanındaki font oranları gerçek kaynak ölçülerinden gelir; OCR çıktısı gerçek PDF font metrikleri değildir.
 
-Bu destek yalnızca `local/` sürümüne eklenmiştir; Firebase hosting tarafında OCR işlem servisi veya compute gereksinimi yoktur.
+- Belgeler buluta gönderilmez. Sabit sürümlü GLM-OCR ve PP-DocLayoutV3 modelleri ilk hazırlamada indirilir; hazır modellerle yerel çıkarım yapılır.
+- Sayfalar ihtiyaç oldukça işlenir. Kalıcı model süreci ve tek işlem kuyruğu yeniden model yüklemeyi önler; hazır sayfa önbelleği bu kuyruğu beklemez.
+- Sonuçlar `uploads/pdf/<kitap-id>/page-<N>-v14.*` altında saklanır. Eski işlem hatlarının önbelleği yeniden kullanılmaz; sürümlü dosya adları eski sunucu süreçlerinin sonuçlarıyla çakışmaz. Kitap silinince ilgili önbellek de silinir.
+- `GET /api/books/:id/pdf/pages/:page` seçilebilir `blocks`, kaynak (`native`/`ocr`), `engine`, `device`, `modelRevision`, `elapsedMs`, `pipelineVersion`, `metrics`, `qualityLimits` ve kaynak görsel adresini döndürür. `?ocr=1` yeniden çıkarım ister. GLM için `confidence` değeri `null`dır; uydurma doğruluk yüzdesi verilmez.
+- OCR kusursuz değildir: geçerli LaTeX doğru denklem garantisi vermez. Küçük semboller, grafik etiketleri ve karmaşık düzen için orijinal sayfa esas alınmalıdır. GLM'nin model kartı Türkçe için ayrı doğruluk garantisi sunmaz.
+
+Bu destek yalnızca `local/` sürümündedir; Firebase hosting tarafı değişmez.
+
+### GPU kullanımı
+
+Metin ve formül tanıma aynı GLM-OCR modelini kullanır. `OCR_DEVICE=auto` kullanılabilir CUDA GPU'yu, yoksa CPU'yu seçer. CUDA yolunda BF16/SDPA, CPU yolunda FP32/SDPA kullanılır; CPU iş parçacığı sayısı en fazla dörttür. `cuda` GPU'yu zorunlu kılar ve başlatma hatasını gizlemez; `cpu` GPU kullanımını kapatır. Seçilen cihaz ve model sürümü sonuçla birlikte arayüzde görünür.
+
+```powershell
+$env:OCR_DEVICE = "cuda"
+npm start
+```
+
+Kaynak kod veya cihaz ayarı değişince çalışan Node.js sunucusunu yeniden başlatın. Eski API işlem hattı saptanırsa okuyucu sonucu yeni modelden gelmiş gibi göstermeyip yeniden başlatma uyarısı verir.
 
 ### WR-1.pdf ile doğrulama
 
-12 sayfalık örnek uygulamaya yüklenerek işlendi. Önceki metin çıkarımı 8 sayfada sıfır karakter, kalan 4 sayfada yalnızca kısa etiketler üretiyordu. Paragraf yapılı yerel OCR 12 sayfada toplam 30.555 karakter metin ve 1489 × 2105 piksel boyutunda 12 sayfa görseli üretti. Sayfa 4'teki dağılım grafiği ve sayfa 5'teki renkli eğriler okuyucu arayüzünde kontrol edildi. İlk sayfanın üç ana paragrafı tek tek aynı font boyutunda, bölünmeden aktarılır; son paragraf ve sayfa numarası ayrıdır. Font ayarı 24'ten 28'e değiştirilerek oranların korunduğu, sayfa/kaydırma modlarında yan yana görünüm ve dar ekranda yatay kaydırma doğrulandı. Yerel PDF metnini kullanma, OCR'ye geçiş ve yapılı önbellek de gerçek API üzerinden çalıştırıldı.
+Örnek dosya `Microsoft: Print To PDF` tarafından üretilmiş; şifreleme ve kopyalama izni kısıtlaması yoktur. Sekiz sayfada metin/font kaydı yok, dört sayfada yalnızca grafik etiketleri vardır. Gövde harfleri vektör çizim yollarına dönüştürülmüştür: keskin yakınlaştırma mümkündür fakat metin çıkarmak için OCR gerekir.
 
-Paragraf ve font ilişkisi regresyonlarını çalıştırmak için:
+RTX 4070 SUPER üzerinde gerçek 8. sayfa 28 kaynak penceresinden okundu: 14 metin ve 14 formül; dokuz satır içi formül güvenli konum bilgisiyle birleştirildi. Hazır modelle uçtan uca çıkarım 13,9 saniye, disk sayfa önbelleği 1 ms sürdü. Bağımsız pencere ölçümü 15,2 saniye; aynı 28 pencereyle ikinci çağrı 0,63 saniye ve 28 bölge önbelleği isabeti verdi. İlk tarayıcı isteği model yüklemesi dahil 33 saniyeydi. Ölçümler bu makineye aittir; daha az ayrıştıran önceki GLM hattı 8,39 saniyeydi. Yeni hat daha fazla kaynak kontrolü yapar, soğuk çıkarımın her durumda hızlandığı iddia edilmez.
+
+Algoritma başlığı, başlatma, koşullu seçim, ödül/sayaç/değer güncellemeleri, `1/n`, `alpha_t(a)`, `Q_{n+1}`, epsilon ve (2.5)/(2.6) numaraları kaynakla karşılaştırıldı. İki belirsiz bölge korunup açık uyarıyla gösterildi; formül modelinin yanlış harf eklediği koşul satırı doğru bağlam sonucunun üzerine yazılmadı. Algoritma LaTeX'indeki çok sözcüklü `mathrm` metinleri sözcük aralıklarını koruyan `text` olarak aktarılır; tek harfli matematik çarpımları değiştirilmez. %500 yakınlaştırma ve dar ekran kaynak görünümü önceki renderer doğrulamasında kontrol edildi.
+
+Kaynak pencere sınırlarını, yerel PDF metnini ve karma metin/LaTeX sözleşmesini doğrulamak için:
 
 ```bash
-node --test pdf-layout.test.js
+npm test
 ```

@@ -14,9 +14,10 @@
     <!-- JSZip for handling HTMLZ (Zip) files -->
     <script src="/libs/jszip.min.js"></script>
     <!-- PDF.js for handling PDF files -->
-    <script src="/libs/pdf.min.js"></script>
-    <script>
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '/libs/pdf.worker.min.js';
+    <script type="module">
+        import * as pdfjsLib from '/node_modules/pdfjs-dist/build/pdf.mjs';
+        window.pdfjsLib = pdfjsLib;
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker.mjs';
     </script>
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
@@ -133,7 +134,7 @@
                 <a id="open-original-pdf" class="mode-btn" target="_blank" rel="noopener noreferrer">
                     <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Orijinal PDF'yi tarayıcıda aç
                 </a>
-                <small>Sayfa görselleri grafikleri korur. Metin yoksa veya yalnızca kısa etiketler varsa OCR bu yerel sunucuda çalışır; sonuç diskte saklanır. Eksik metin için sayfadaki OCR düğmesini kullanabilirsiniz.</small>
+                <small>Orijinal PDF, yakınlaştırılabilir gerçek PDF renderer ile yanında açılır; grafikler ve denklemler kaynak haliyle korunur. Metin yoksa yerel belge OCR, seçilebilir metin ve LaTeX denklemleri çıkarır; model, cihaz ve tanıma durumu sayfada gösterilir. Sonucu kaynakla karşılaştırın: OCR hataları olabilir. Sayfadaki OCR düğmesi önbelleği kullanmak yerine sonucu yeniden üretir.</small>
             </div>
             <hr>
 
@@ -283,6 +284,7 @@
         </div>
     </dialog>
 
+    <script src="/pdf-viewer.js"></script>
     <script src="/script.js"></script>
 </body>
 </html>

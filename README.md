@@ -18,7 +18,7 @@ Proje ihtiyacınıza göre iki farklı çalışma modeline sahiptir:
 - 🔤 **Gelişmiş Tipografi:** Yazı tipi ailesi (Inter, Outfit, Lora, Sistem varsayılanı), boyut, satır yüksekliği, sayfa kenar boşlukları ve paragraf aralığı ayarları.
 - 📑 **İçindekiler (TOC):** Bölümler arasında tek tıkla gezinme.
 - 📑 **PDF & EPUB Hibrit Desteği:** EPUB arşivlerini doğrudan istemcide açabilme ve PDF dosyalarını optimize edilmiş parça yükleme ile okuma.
-- **Yerel PDF OCR (`local/`):** Taranmış sayfalar yerel Tesseract ile okunur; orijinal görsel ve paragraf yapılı metin yan yana gösterilir. Ölçülen göreli font boyutları korunur; OCR ölçümleri yaklaşık değerlerdir. İngilizce/Türkçe modeller kurulumla gelir, çalışma sırasında bulut OCR servisi gerekmez. Firebase sürümü değişmez.
+- **Yerel PDF OCR (`local/`):** GLM-OCR ve PP-DocLayoutV3 önce sayfa yapısını çıkarır; tüm metin ve formülleri PDF kaynağından yeniden çizilen uygun büyüklükte pencerelerden okur. Satır içi matematik özgün metin konumuna yerleştirilir; orijinal PDF yakınlaştırılabilir ve OCR'yi beklemez. Yerel GPU/CPU kurulumu için `local/README.md`; Firebase sürümü değişmez.
 
 ---
 
@@ -29,12 +29,16 @@ reader/
 ├── local/                      # Yerel Node.js / Express sürümü
 │   ├── server.js               # Express API ve statik dosya sunucusu
 │   ├── package.json            # Sunucu, PDF çizimi ve yerel OCR bağımlılıkları
-│   ├── pdf-ocr.js              # PDF sayfa görselleri, Tesseract OCR ve disk önbelleği
-│   ├── pdf-layout.js           # Paragraf sınırları ve göreli font ölçüleri
+│   ├── pdf-ocr.js              # PDF çıkarımı, belge OCR entegrasyonu ve sürümlü önbellek
+│   ├── pdf-windows.js          # Tüm metin/formüller için uyarlanabilir kaynak PDF pencereleri
+│   ├── document-ocr.js         # Kalıcı Python model süreci ve işlem kuyruğu
+│   ├── document-ocr-worker.py  # Yapı analizi, parça bazında metin/LaTeX tanıma
+│   ├── document-blocks.js      # Kaynak konumlu satır içi matematik ve seçilebilir çıktı
+│   ├── pdf-layout.js           # Yerel PDF paragraf sınırları ve font ölçüleri
 │   ├── index.html              # Okuyucu arayüzü
 │   ├── script.js               # İstemci mantığı (yerel API entegreli)
 │   ├── style.css               # Tema ve okuyucu stilleri
-│   ├── .env.example            # Port yapılandırma şablonu
+│   ├── .env.example            # Port ve OCR cihazı yapılandırma şablonu
 │   ├── library.example.json    # Boş kütüphane şablonu
 │   └── README.md               # Yerel sürüm kılavuzu
 │

@@ -12,6 +12,15 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentGlobalPage = 1;
     let totalBookPages = 0;
     let currentPdfDoc = null;
+    let currentPdfLoadingTask = null;
+    let pdfZoom = null;
+    const pdfPageStates = new Map();
+    const pdfResources = {
+        cMapUrl: '/node_modules/pdfjs-dist/cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: '/node_modules/pdfjs-dist/standard_fonts/',
+        wasmUrl: '/node_modules/pdfjs-dist/wasm/'
+    };
     let currentPdfPage = 1;
     let totalPdfPages = 0;
     let isNavigatingPage = false;
@@ -371,8 +380,11 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionAbort = new AbortController();
         stopTTS();
         closePageJumpModal();
-        if (currentPdfDoc) currentPdfDoc.destroy();
+        disposePdfPages();
+        if (currentPdfLoadingTask) currentPdfLoadingTask.destroy().catch(error => console.error('PDF kapatılamadı:', error));
+        currentPdfLoadingTask = null;
         currentPdfDoc = null;
+        pdfZoom = null;
         currentBookId = null;
         currentBookType = null;
         epubSpine = [];
@@ -635,15 +647,15 @@ document.addEventListener('DOMContentLoaded', () => {
         if (type === 'epub') {
             section = await loadEpubChapter(chapterIndex);
         } else if (type === 'pdf') {
-            const wrapper = document.createElement('div');
-            wrapper.innerHTML = await getPdfPageHtml(localPage + 1);
-            section = wrapper.firstElementChild;
+            section = createPdfPageSection(localPage + 1);
         } else section = makeHtmlSection(document);
         if (token !== session || location !== locationVersion) return;
         stopTTS();
+        disposePdfPages();
         bookContent.replaceChildren(section);
         currentChapterIndex = chapterIndex;
         currentPdfPage = type === 'pdf' ? localPage + 1 : 1;
+        if (type === 'pdf') mountPdfPage(section);
         bookViewport.scrollTo({left: 0, top: 0, behavior: 'instant'});
         await settleContent(bookContent);
         if (token !== session || location !== locationVersion) return;
@@ -739,19 +751,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!section || section.dataset.loaded !== 'true') {
                     let fresh;
                     if (isEpub) fresh = await loadEpubChapter(i);
-                    else {
-                        const wrapper = document.createElement('div');
-                        wrapper.innerHTML = await getPdfPageHtml(i + 1);
-                        fresh = wrapper.firstElementChild;
-                    }
+                    else fresh = createPdfPageSection(i + 1);
                     if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll') return;
                     const anchor = active.getBoundingClientRect().top;
+                    if (section) disposePdfPage(section);
                     if (section) section.replaceWith(fresh);
                     else {
                         const after = Array.from(bookContent.children).find(el => Number(el.dataset.index) > i);
                         bookContent.insertBefore(fresh, after || null);
                     }
                     section = fresh;
+                    if (!isEpub) mountPdfPage(section);
                     if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - anchor, behavior: 'instant'});
                     await settleContent(section);
                     if (token !== session || location !== locationVersion) return;
@@ -764,6 +774,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if ((elementIndex >= start && elementIndex <= end) || element.dataset.loaded !== 'true') continue;
                 const height = element.getBoundingClientRect().height;
                 if (ttsActive) stopTTS();
+                disposePdfPage(element);
                 element.replaceChildren();
                 element.style.height = height + 'px';
                 element.dataset.loaded = 'false';
@@ -892,8 +903,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 await loadEpubSpine();
             } else if (fileName.endsWith('.pdf')) {
                 currentBookType = 'pdf';
-                currentPdfDoc = await pdfjsLib.getDocument({url: book.bookUrl, disableAutoFetch: true, disableStream: true}).promise;
-                totalBookPages = totalPdfPages = currentPdfDoc.numPages;
+                const loadingTask = pdfjsLib.getDocument({...pdfResources, url: book.bookUrl, disableAutoFetch: true, disableStream: true});
+                currentPdfLoadingTask = loadingTask;
+                const pdf = await loadingTask.promise;
+                if (token !== session) return;
+                currentPdfDoc = pdf;
+                totalBookPages = totalPdfPages = pdf.numPages;
             } else {
                 currentBookType = 'html';
                 const response = await fetch(book.bookUrl, {signal: sessionAbort.signal});
@@ -988,12 +1003,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (meta.toc) toc = meta.toc;
             } else if (fileName.endsWith('.pdf')) {
                 const arrayBuffer = await file.arrayBuffer();
-                const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+                const loadingTask = pdfjsLib.getDocument({...pdfResources, data: arrayBuffer});
                 try {
-                    let meta = await pdf.getMetadata();
+                    const pdf = await loadingTask.promise;
+                    const meta = await pdf.getMetadata();
                     if (meta.info && meta.info.Title) title = meta.info.Title;
-                } catch(e) {}
-                finally { await pdf.destroy(); }
+                } finally { await loadingTask.destroy(); }
             }
 
             // FormData ile dosyayı ve bilgileri sunucuya gönder
@@ -1294,23 +1309,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const ocrButton = event.target.closest('[data-pdf-ocr]');
         if (ocrButton && currentBookType === 'pdf') {
-            const pageNumber = Number(ocrButton.dataset.pdfOcr);
-            await navigate(async () => {
-                const section = ocrButton.closest('.pdf-page');
-                ocrButton.disabled = true;
-                ocrButton.textContent = 'Yerel OCR çalışıyor…';
-                try {
-                    const html = await getPdfPageHtml(pageNumber, true);
-                    sessionAbort.signal.throwIfAborted();
-                    stopTTS();
-                    section.outerHTML = html;
-                    await settleContent(bookContent);
-                    updatePagedView();
-                } finally {
-                    ocrButton.disabled = false;
-                    ocrButton.textContent = 'Bu sayfayı OCR ile oku';
-                }
-            });
+            const section = ocrButton.closest('.pdf-page');
+            stopTTS();
+            await hydratePdfPage(section, true);
             return;
         }
         const link = event.target.closest('a');
@@ -1380,44 +1381,134 @@ document.addEventListener('DOMContentLoaded', () => {
         return math;
     }
 
-    async function getPdfPageHtml(pageNumber, forceOcr = false) {
-        if (!currentPdfDoc) return '';
-        const signal = sessionAbort.signal;
-        const response = await fetch('/api/books/' + encodeURIComponent(currentBookId) +
-            '/pdf/pages/' + pageNumber + (forceOcr ? '?ocr=1' : ''), {signal});
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'PDF sayfası hazırlanamadı.');
-        signal.throwIfAborted();
+    function disposePdfPage(section) {
+        const state = pdfPageStates.get(section);
+        if (!state) return;
+        state.abort?.abort();
+        state.viewer.destroy();
+        pdfPageStates.delete(section);
+    }
 
+    function disposePdfPages() {
+        for (const section of pdfPageStates.keys()) disposePdfPage(section);
+    }
+
+    function mountPdfPage(section) {
+        const pageNumber = Number(section.dataset.pageIndex);
+        const viewer = new PdfPageViewer(section.querySelector('.pdf-page-image-column'), currentPdfDoc, pageNumber, {
+            zoom: pdfZoom,
+            onZoom: zoom => {pdfZoom = zoom;}
+        });
+        pdfPageStates.set(section, {viewer, abort: null});
+        void hydratePdfPage(section);
+    }
+
+    async function hydratePdfPage(section, forceOcr = false) {
+        const state = pdfPageStates.get(section);
+        if (!state || !section.isConnected) return;
+        state.abort?.abort();
+        const controller = new AbortController();
+        state.abort = controller;
+        const signal = controller.signal;
+        const pageNumber = Number(section.dataset.pageIndex);
+        const status = section.querySelector('.pdf-text-status');
+        const text = section.querySelector('.pdf-page-text');
+        const button = section.querySelector('[data-pdf-ocr]');
+        const token = session;
+        const bookId = currentBookId;
+        button.disabled = true;
+        button.textContent = forceOcr ? 'OCR yeniden üretiliyor…' : 'Metin hazırlanıyor…';
+        status.dataset.state = 'loading';
+        status.removeAttribute('title');
+        status.textContent = (forceOcr ? 'Belge OCR yeniden üretiliyor' : 'PDF metni / belge OCR hazırlanıyor') +
+            ' · İlk kullanımda yerel model indirilip yüklenebilir; orijinal PDF gerçek zamanlı işlenir ve bağımsız olarak kullanılabilir.';
+        text.setAttribute('aria-busy', 'true');
+        try {
+            const response = await fetch('/api/books/' + encodeURIComponent(bookId) +
+                '/pdf/pages/' + pageNumber + (forceOcr ? '?ocr=1' : ''), {signal});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || 'PDF metni hazırlanamadı.');
+            signal.throwIfAborted();
+            if (token !== session || pdfPageStates.get(section) !== state || !section.isConnected) return;
+            if (result.pipelineVersion !== 14) {
+                text.replaceChildren();
+                delete section.dataset.textSource;
+                throw new Error('Eski veya uyumsuz yerel sunucu yanıtı (beklenen belge hattı: 14). Yerel sunucuyu yeniden başlatın, ardından OCR sonucunu yeniden üretin.');
+            }
+            const qualityLimits = result.qualityLimits ?? [];
+            if (!Array.isArray(qualityLimits) || qualityLimits.some(limit => typeof limit !== 'string' || !limit.trim())) {
+                throw new Error('Belge OCR kaynak doğruluğu uyarıları geçersiz.');
+            }
+            const content = makePdfPageText(result);
+            const anchor = currentSettings.readingMode === 'scroll'
+                ? Array.from(bookContent.children).find(element => element.getBoundingClientRect().bottom > 100) : null;
+            const top = anchor?.getBoundingClientRect().top;
+            text.replaceChildren(...content.childNodes);
+            section.dataset.textSource = result.source;
+            status.dataset.state = qualityLimits.length ? 'warning' : 'ready';
+            const metadata = [result.engine, result.device,
+                result.modelRevision ? 'Model: ' + result.modelRevision.split(':').map(revision => revision.slice(0, 8)).join(':') : null,
+                Number.isFinite(result.elapsedMs) ? (result.elapsedMs / 1000).toFixed(1) + ' sn' : null].filter(Boolean);
+            status.title = [result.engine, result.device, result.modelRevision, ...qualityLimits].filter(Boolean).join('\n');
+            status.textContent = (result.source === 'ocr' ? 'Yerel belge OCR' : 'PDF metni') +
+                (metadata.length ? ' · ' + metadata.join(' · ') : '') +
+                (qualityLimits.length ? ` · ${qualityLimits.length} bölgede matematik eşleşmesi belirsiz; kaynakla karşılaştırın.` :
+                    result.source === 'ocr' ? ' · Tanıma hataları olabilir; kaynakla karşılaştırın.' : '');
+            if (anchor?.isConnected && anchor !== section && !isNavigatingPage) {
+                window.scrollBy({top: anchor.getBoundingClientRect().top - top, behavior: 'instant'});
+            }
+        } catch (error) {
+            if (signal.aborted || token !== session || !section.isConnected) return;
+            console.error('PDF metni hazırlanamadı:', error);
+            status.dataset.state = 'error';
+            status.textContent = 'Metin hazırlanamadı: ' + error.message + ' · OCR düğmesiyle yeniden deneyebilirsiniz.';
+        } finally {
+            if (state.abort === controller && section.isConnected && pdfPageStates.get(section) === state) {
+                text.setAttribute('aria-busy', 'false');
+                button.disabled = false;
+                button.textContent = 'Bu sayfanın OCR sonucunu yeniden üret';
+            }
+        }
+    }
+
+    function createPdfPageSection(pageNumber) {
         const section = document.createElement('section');
         section.id = 'pdf-page-' + pageNumber;
         section.className = 'pdf-page';
         section.dataset.pageIndex = pageNumber;
         section.dataset.index = pageNumber - 1;
         section.dataset.loaded = 'true';
-        section.dataset.textSource = result.source;
         section.setAttribute('role', 'region');
         section.setAttribute('aria-label', 'Sayfa ' + pageNumber);
         const tools = document.createElement('div');
         tools.className = 'pdf-page-tools';
         const status = document.createElement('span');
-        status.textContent = result.source === 'ocr'
-            ? 'Yerel OCR · Metin hataları olabilir' : 'PDF metni';
+        status.className = 'pdf-text-status';
+        status.setAttribute('role', 'status');
+        status.textContent = 'Metin hazırlanıyor…';
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'mode-btn';
         button.dataset.pdfOcr = pageNumber;
-        button.textContent = 'Bu sayfayı OCR ile oku';
+        button.textContent = 'Bu sayfanın OCR sonucunu yeniden üret';
         tools.append(status, button);
-        const image = document.createElement('img');
-        image.className = 'pdf-page-image';
-        image.src = result.imageUrl;
-        image.width = result.width;
-        image.height = result.height;
-        image.alt = 'Sayfa ' + pageNumber + ' — orijinal metin, grafik ve resimler';
         const text = document.createElement('div');
         text.className = 'pdf-page-text';
         text.setAttribute('aria-label', 'Çıkarılan metin');
+        const comparison = document.createElement('div');
+        comparison.className = 'pdf-page-comparison';
+        const columns = document.createElement('div');
+        columns.className = 'pdf-page-columns';
+        const imageColumn = document.createElement('div');
+        imageColumn.className = 'pdf-page-image-column';
+        columns.append(imageColumn, text);
+        comparison.appendChild(columns);
+        section.append(tools, comparison);
+        return section;
+    }
+
+    function makePdfPageText(result) {
+        const text = document.createElement('div');
         for (const block of result.blocks) {
             if (block.type === 'image') {
                 const figure = document.createElement('figure');
@@ -1446,6 +1537,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const p = document.createElement('p');
             p.className = 'pdf-text-block';
+            p.dataset.ttsText = block.text;
             for (const run of block.runs) {
                 if (run.type === 'math') {
                     p.appendChild(makePdfMath(run.latex, false, run.fontScale));
@@ -1460,20 +1552,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (!text.children.length) {
             const notice = document.createElement('div');
-            notice.textContent = 'Metin tespit edilemedi; orijinal sayfa görseli yanında korunuyor.';
+            notice.textContent = 'Metin tespit edilemedi; orijinal PDF yanındaki gerçek renderer ile kullanılabilir.';
             text.appendChild(notice);
         }
-        const comparison = document.createElement('div');
-        comparison.className = 'pdf-page-comparison';
-        const columns = document.createElement('div');
-        columns.className = 'pdf-page-columns';
-        const imageColumn = document.createElement('div');
-        imageColumn.className = 'pdf-page-image-column';
-        imageColumn.appendChild(image);
-        columns.append(imageColumn, text);
-        comparison.appendChild(columns);
-        section.append(tools, comparison);
-        return section.outerHTML;
+        return text;
     }
     async function handleRouting() {
         const path = window.location.pathname;
@@ -1608,7 +1690,7 @@ document.addEventListener('DOMContentLoaded', () => {
         paragraphs.forEach(p => {
             if (p.classList.contains('book-main-title')) return;
             
-            const text = p.innerText.trim();
+            const text = (p.dataset.ttsText ?? p.innerText).trim();
             if (!text) return;
             
             p.classList.add('tts-sentence');

@@ -333,9 +333,11 @@ body {
     top: 60px;
     height: calc(100vh - 120px);
     display: flex;
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
     min-width: 0;
+    min-height: 0;
 }
 
 #reader-view.paged-mode .pdf-page-image-column {
@@ -353,33 +355,88 @@ body {
     margin-bottom: 16px;
 }
 
-#book-content .pdf-page-image {
-    display: block;
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
-    object-fit: contain;
-    margin: 0 auto;
+.pdf-zoom-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font: 13px/1.4 system-ui, sans-serif;
+}
+
+.pdf-zoom-controls .mode-btn {
+    flex: 0 0 auto;
+    padding: 7px 10px;
+}
+
+.pdf-zoom-status {
+    min-width: 82px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.pdf-original-viewport {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    position: relative;
+    overflow: auto;
+    background: #ffffff;
+    color: #111;
     border-radius: 4px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    scrollbar-gutter: stable;
+}
+
+.pdf-original-viewport:focus-visible {
+    outline: 2px solid var(--ui-primary);
+    outline-offset: 3px;
+}
+
+.pdf-original-surface {
+    position: relative;
+    margin: 0 auto;
     background: #ffffff;
+}
+
+.pdf-original-tile {
+    position: absolute;
+    display: block;
+}
+
+.pdf-render-status {
+    font: 13px/1.4 system-ui, sans-serif;
+    overflow-wrap: anywhere;
+}
+
+.pdf-render-status:empty {
+    display: none;
 }
 
 .pdf-page-text {
     min-width: 0;
     white-space: normal;
     overflow-wrap: anywhere;
+    min-height: calc(100vh - 180px);
 }
 
 #book-content .pdf-text-block {
     margin: 0 0 var(--paragraph-spacing);
 }
 
-#reader-view.paged-mode #book-content .pdf-page-image {
-    max-width: 100%;
-    max-height: 100%;
+.pdf-text-block {
+    white-space: pre-wrap;
 }
+
+.pdf-text-status {
+    overflow-wrap: anywhere;
+}
+
+.pdf-text-status[data-state="error"],
+.pdf-text-status[data-state="warning"] {
+    font-weight: 600;
+}
+
 
 #book-content .pdf-figure {
     margin: 1em 0;
@@ -806,7 +863,7 @@ select option {
 
     .pdf-page-image-column {
         position: static;
-        height: auto;
+        height: min(70vh, 640px);
     }
 }
 

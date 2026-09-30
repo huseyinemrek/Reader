@@ -7,22 +7,17 @@
     "node": "^22.13.0 || >=24.0.0"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.3.0",
     "@napi-rs/canvas": "^1.0.9",
-    "@tesseract.js-data/eng": "^1.0.0",
-    "@tesseract.js-data/tur": "^1.0.0",
     "cors": "^2.8.6",
     "express": "^4.22.2",
     "katex": "^0.18.9",
     "multer": "^1.4.5-lts.1",
-    "onnxruntime-node": "^1.30.0",
     "pdfjs-dist": "^6.3.289",
-    "tesseract.js": "^7.0.0",
     "yauzl": "^3.4.0"
   },
   "scripts": {
     "start": "node server.js",
-    "math:setup": "node math-ocr.js",
-    "test": "node --test pdf-layout.test.js pdf-regions.test.js"
+    "ocr:setup": "node document-ocr.js --setup",
+    "test": "node --test pdf-layout.test.js pdf-regions.test.js document-blocks.test.js pdf-windows.test.js"
   }
 }

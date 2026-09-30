@@ -1,9 +1,5 @@
 'use strict';
 
-// The dot on an OCR "i" is part of its symbol box, so it is cap-height ink.
-const X_HEIGHT = /^[acemnorsuvwxz]$/;
-const CAP_HEIGHT = /^[A-Z0-9bdfhikl]$/;
-
 // Geometry is processing-only: cached/client blocks contain the public contract,
 // while region recognition can still address individual source glyphs.
 const sourceLines = new WeakMap();
@@ -20,11 +16,6 @@ function median(samples) {
     return null;
 }
 
-function heights(symbols, pattern) {
-    return symbols.filter(symbol => pattern.test(symbol.text) && !symbol.is_superscript && !symbol.is_subscript)
-        .map(symbol => ({ value: symbol.bbox.y1 - symbol.bbox.y0, weight: 1 }));
-}
-
 function union(a, b) {
     return { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) };
 }
@@ -35,62 +26,6 @@ function clean(text) {
 
 function weight(text) {
     return Math.max(1, (text.match(/[\p{L}\p{N}]/gu) || []).length);
-}
-
-function rowXHeight(line) {
-    const row = line.rowAttributes || {};
-    const height = row.rowHeight - (row.ascenders || 0) - (row.descenders || 0);
-    return height > 0 ? height : null;
-}
-
-function ocrBlocks(data) {
-    const lines = [];
-    let hint = 0;
-    for (const block of data.blocks || []) {
-        for (const paragraph of block.paragraphs || []) {
-            hint += 1;
-            for (const line of paragraph.lines || []) {
-                if (!clean(line.text || '')) continue;
-                const symbols = (line.words || []).flatMap(word => word.symbols || []);
-                lines.push({ ...line, hint, symbols, lower: median(heights(symbols, X_HEIGHT)), caps: median(heights(symbols, CAP_HEIGHT)) });
-            }
-        }
-    }
-    if (!lines.length) {
-        if (clean(data.text || '')) throw new Error('OCR returned text without paragraph geometry.');
-        return [];
-    }
-    // Learn the cap/x-height relationship from the page itself, rather than treating
-    // a digit-only footer's ink height as a body row height (Tesseract inflates that row).
-    const capRatio = median(lines.filter(line => line.lower && line.caps)
-        .map(line => ({ value: line.caps / line.lower, weight: weight(line.text) }))) || 1.45;
-    for (const line of lines) {
-        const capOnly = /^[A-Z0-9\s.,:;!?()-]+$/u.test(clean(line.text));
-        line.size = line.lower || (line.caps && line.caps / capRatio) ||
-            (capOnly && (line.bbox.y1 - line.bbox.y0) / capRatio) || rowXHeight(line) || (line.bbox.y1 - line.bbox.y0) / capRatio;
-        line.baselineY = line.baseline ? (line.baseline.y0 + line.baseline.y1) / 2 : line.bbox.y1;
-        line.parts = (line.words || []).filter(word => clean(word.text || '')).map((word, index) => {
-            const symbols = word.symbols || [];
-            const lower = heights(symbols, X_HEIGHT);
-            const caps = heights(symbols, CAP_HEIGHT);
-            // Mixed-case short words have too little x-height evidence: OCR can
-            // assign a neighboring ascender's box to their only lowercase letter.
-            const capHeight = median(caps);
-            let measured = lower.length >= 2 ? median(lower)
-                : /^[A-Z0-9]+$/u.test(clean(word.text)) && caps.length >= 2 ? capHeight / capRatio : null;
-            // A genuine font change scales both glyph classes. Contradictory
-            // measurements provide no evidence to override this line's font size.
-            if (measured && capHeight && Math.abs(capHeight / measured / capRatio - 1) > 0.2) {
-                measured = null;
-            }
-            const size = measured && Math.abs(measured / line.size - 1) > 0.15 ? measured : line.size;
-            return { text: `${index ? ' ' : ''}${clean(word.text)}`, size,
-                bbox: word.bbox || symbols.filter(symbol => symbol.bbox).reduce((box, symbol) => box ? union(box, symbol.bbox) : symbol.bbox, null),
-                symbols };
-        });
-        if (!line.parts.length) line.parts = [{ text: clean(line.text), size: line.size }];
-    }
-    return layoutBlocks(lines, true);
 }
 
 function nativeBlocks(content, viewport) {
@@ -118,7 +53,7 @@ function nativeBlocks(content, viewport) {
             bbox.x0 >= line.bbox.x0 - size * 0.25 && bbox.x0 - line.bbox.x1 < Math.max(size, line.size) * 3;
         const text = clean(item.str);
         if (!sameRow) {
-            line = { bbox, baselineY: origin.y, size, text: '', parts: [], hint: 0 };
+            line = { bbox, baselineY: origin.y, size, text: '', parts: [] };
             lines.push(line);
         }
         const needsSpace = line.parts.length && (bbox.x0 - line.bbox.x1 > size * 0.08 || /^\s/u.test(item.str) || /\s$/u.test(previousItem.str));
@@ -133,7 +68,7 @@ function nativeBlocks(content, viewport) {
     return layoutBlocks(lines);
 }
 
-function layoutBlocks(lines, noisyMeasurements = false) {
+function layoutBlocks(lines) {
     if (!lines.length) return [];
     const reference = median(lines.flatMap(line => line.parts.map(part => ({ value: part.size, weight: weight(part.text) }))));
     const spacings = [];
@@ -161,26 +96,19 @@ function layoutBlocks(lines, noisyMeasurements = false) {
             const overlap = Math.min(right, line.bbox.x1) - Math.max(left, line.bbox.x0);
             const indented = line.bbox.x0 - left > size * 0.8;
             const previousShort = previous.bbox.x1 - previous.bbox.x0 < width * 0.85;
-            const sameHint = line.hint && line.hint === previous.hint;
-            // OCR paragraph boundaries are hints: a normal-spaced, flush-left full
-            // line continues prose even when recognition creates a new paragraph.
             merge = distance > size * 0.5 && distance <= leading * size * 1.22 &&
                 Math.abs(line.size / previous.size - 1) < 0.25 && overlap > Math.min(width, line.bbox.x1 - line.bbox.x0) * 0.5 &&
-                !indented && (sameHint || !previousShort);
+                !indented && !previousShort;
         }
         if (merge) group.push(line);
         else groups.push([line]);
     }
     const vocabulary = new Set(lines.flatMap(line => clean(line.text).toLowerCase().match(/[\p{L}]+(?:-[\p{L}]+)*/gu) || []));
     return groups.map(group => {
-        const groupSize = median(group.flatMap(line => line.parts.map(part => ({ value: part.size, weight: weight(part.text) }))));
         const runs = [];
         let bbox = group[0].bbox;
         const append = (text, size) => {
             if (!text) return;
-            // Raster glyph edges quantize to integer pixels. Consolidate one-pixel
-            // differences only within this visual paragraph; native sizes stay exact.
-            if (noisyMeasurements && Math.abs(size - groupSize) <= 1) size = groupSize;
             const fontScale = Math.round(size / reference * 1000) / 1000;
             const previous = runs[runs.length - 1];
             if (previous && previous.fontScale === fontScale) previous.text += text;
@@ -201,7 +129,7 @@ function layoutBlocks(lines, noisyMeasurements = false) {
             for (const part of line.parts) append(part.text, part.size);
         });
         const block = { type: 'text', text: runs.map(run => run.text).join(''), bbox, runs };
-        sourceLines.set(block, { lines: group, reference, noisyMeasurements });
+        sourceLines.set(block, { lines: group, reference });
         return block;
     });
 }
@@ -217,7 +145,7 @@ function validBbox(box) {
 
 function validImage(image) {
     return image.kind === 'figure' && typeof image.alt === 'string' &&
-        /^\/uploads\/pdf\/[A-Za-z0-9_-]{1,128}\/page-[1-9]\d*-region-[1-9]\d*\.png$/.test(image.imageUrl) &&
+        /^\/uploads\/pdf\/[A-Za-z0-9_-]{1,128}\/page-[1-9]\d*-v[1-9]\d*-region-[1-9]\d*\.png$/.test(image.imageUrl) &&
         Number.isSafeInteger(image.width) && image.width > 0 &&
         Number.isSafeInteger(image.height) && image.height > 0 && validBbox(image.bbox);
 }
@@ -246,4 +174,4 @@ function blockGeometry(block) {
     return sourceLines.get(block);
 }
 
-module.exports = { ocrBlocks, nativeBlocks, blocksText, validBlocks, blockGeometry };
+module.exports = { nativeBlocks, blocksText, validBlocks, blockGeometry };

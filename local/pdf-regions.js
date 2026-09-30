@@ -7,6 +7,10 @@ const { blockGeometry } = require('./pdf-layout');
 
 const CAPTION = /^(?:Figure|Fig\.|Şekil|Sekil)\s*\d+(?:[.\-]\d+)*\s*[:：]/iu;
 const EQUATION_LABEL = /\((\d+(?:\.\d+)*)\)\s*[,.;]?$/u;
+// OCR can confuse an assignment arrow with a dash, plus, or guillemet.
+// These are crop-location hints only; the source recognizer determines LaTeX.
+const OPERATOR = /^(?:[=+−–—\-*/<>≤≥|←→⇐⇒«»]+|\d[\d.,…]*|[=+−–—\-←→«»<>]+\d[\d.,…]*)$/u;
+const ASSIGNMENT = /^[A-Za-z](?:[\p{L}\d_]*[)\]]|\([^)]*\)|[_\d]*)\s*[=+−–—\-←⇐«<>]/u;
 const union = (a, b) => ({ x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) });
 const overlaps = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
 
@@ -65,7 +69,7 @@ function tokensForLine(line) {
 function isNotation(token) {
     const text = token.text.replace(/[,.;:]$/u, '');
     return token.mathFont || /[α-ωΑ-Ωϵϑϕ∑∏∫√∞≤≥≠≈∈ℝℕ¢£©]/u.test(text) ||
-        /^[A-Za-z][_*+;:.\d-]*\([^)]*\)/u.test(text) || /[_^]/u.test(text) ||
+        /^[A-Za-z][A-Za-z_*+;:.\d-]*\([^)]*\)/u.test(text) || /^[A-Za-z][A-Za-z\d_]{0,2}\)$/u.test(text) || /[_^]/u.test(text) ||
         /^(?:arg\s*max|argmax|log|exp|sin|cos)\b/u.test(text);
 }
 
@@ -82,7 +86,7 @@ function mathSpans(line) {
         else if (/^[A-Za-z]$/u.test(token.text.replace(/[,.;]$/u, ''))) {
             const before = tokens.slice(Math.max(0, index - 3), index).map(item => item.text).join(' ');
             const after = tokens[index + 1] && tokens[index + 1].text;
-            if (/^(?:=|[<>≤≥])$/u.test(after || '') ||
+            if (OPERATOR.test(after || '') ||
                 /(?:action|step|reward|variable|probability|denoted|prior to)\s*$/iu.test(before) && !/^a$/u.test(token.text) ||
                 /action\s*$/iu.test(before) && /^a[,.;]?$/u.test(token.text)) selected.add(index);
         }
@@ -91,13 +95,14 @@ function mathSpans(line) {
     for (const index of [...selected]) {
         if (prefix.has(index)) continue;
         let end = index;
-        while (end + 1 < tokens.length && /^(?:[=+−–—\-*/<>≤≥|]|\d[\d.,…]*|[A-Za-z][,.;]?|\([^)]*\))$/u.test(tokens[end + 1].text)) {
+        while (end + 1 < tokens.length && (OPERATOR.test(tokens[end + 1].text) ||
+            isNotation(tokens[end + 1]) || /^(?:[A-Za-z][,.;]?|\([^)]*\))$/u.test(tokens[end + 1].text))) {
             const next = tokens[end + 1];
-            if (/^[A-Za-z][,.;]?$/u.test(next.text) && !/^[=+−–—\-*/<>≤≥|]$/u.test(tokens[end].text)) break;
+            if (/^[A-Za-z][,.;]?$/u.test(next.text) && !OPERATOR.test(tokens[end].text)) break;
             selected.add(++end);
         }
         let start = index;
-        while (start > 0 && /^(?:[=+−–—\-*/<>≤≥|]|\d[\d.,…]*)$/u.test(tokens[start - 1].text)) selected.add(--start);
+        while (start > 0 && OPERATOR.test(tokens[start - 1].text)) selected.add(--start);
     }
     const spans = [];
     for (let index = 0; index < tokens.length; index += 1) {
@@ -155,11 +160,16 @@ function detectRegions(blocks, { pixels, width, height }) {
     const removed = new Set(figures.flatMap(figure => figure.remove));
     const displays = [];
     const left = Math.min(...blocks.filter(prose).map(block => block.bbox.x0), width * 0.15);
+    const verticalGap = (a, b) => Math.max(0, a.y0 - b.y1, b.y0 - a.y1);
     blocks.forEach((block, index) => {
         if (removed.has(index) || CAPTION.test(block.text) || displays.some(display => display.indices.includes(index))) return;
         const labelMatch = block.text.match(EQUATION_LABEL);
-        const hasOperator = /[=∑∫←→<>]|argmax/u.test(block.text);
-        const indentedFormula = !prose(block) && block.bbox.x0 > left + reference * 1.5 && hasOperator;
+        const hasOperator = /[=∑∫←→⇐⇒<>+−–—«|]|argmax/u.test(block.text);
+        const notation = (geometries[index]?.lines || []).some(line => tokensForLine(line).some(isNotation));
+        const words = block.text.split(/\s+/u).filter(word => /^[\p{L}]{3,}[,;:]?$/u.test(word));
+        const compactFormula = words.length < 2 || ASSIGNMENT.test(block.text) ||
+            (notation && /^[A-Za-z]\w?\s*\|/u.test(block.text));
+        const indentedFormula = !prose(block) && compactFormula && block.bbox.x0 > left + reference * 1.5 && hasOperator;
         const numberedFormula = labelMatch && hasOperator && (!prose(block) ||
             (geometries[index]?.lines.length <= 2 && block.bbox.x0 > left + reference * 1.5));
         if (!numberedFormula && !indentedFormula) return;
@@ -167,14 +177,23 @@ function detectRegions(blocks, { pixels, width, height }) {
         const indices = [index];
         // Fractions and limits are often split into overlapping OCR paragraphs.
         blocks.forEach((other, n) => {
-            if (n === index || removed.has(n) || CAPTION.test(other.text)) return;
-            const overlapY = other.bbox.y0 < bbox.y1 && other.bbox.y1 > bbox.y0;
+            if (n === index || removed.has(n) || CAPTION.test(other.text) ||
+                displays.some(display => display.indices.includes(n))) return;
+            const sameRow = other.bbox.y0 < bbox.y1 && other.bbox.y1 > bbox.y0;
+            const detachedLabel = sameRow && other.bbox.x0 > width * 0.6 &&
+                /^\(\d+(?:\.\d+)*\)\s*[,.;]?$/u.test(other.text.trim());
+            const overlapY = sameRow && other.bbox.x0 < bbox.x1 && other.bbox.x1 > bbox.x0 && !prose(other);
             const smallIndices = /^(?:[A-Za-z]+\s*=\s*\d+\s*)+$/u.test(other.text) &&
                 geometries[n]?.lines.every(line => line.size < reference * 0.9);
+            const limitGap = verticalGap(other.bbox, block.bbox);
+            const nearerEquation = blocks.some((candidate, m) => m !== index && m !== n && !prose(candidate) &&
+                /[=∑∫←⇐]/u.test(candidate.text) &&
+                other.bbox.x0 >= candidate.bbox.x0 - reference && other.bbox.x1 <= candidate.bbox.x1 + reference &&
+                verticalGap(other.bbox, candidate.bbox) < limitGap);
             const nearbyLimit = !prose(other) && (other.text.trim().length < 6 || smallIndices) &&
-                other.bbox.y0 - bbox.y1 < reference * 1.8 && other.bbox.y0 >= bbox.y0 &&
-                other.bbox.x0 >= bbox.x0 - reference && other.bbox.x1 <= bbox.x1 + reference;
-            if (overlapY || nearbyLimit) { indices.push(n); bbox = union(bbox, other.bbox); }
+                limitGap < reference * 1.8 && !nearerEquation &&
+                other.bbox.x0 >= block.bbox.x0 - reference && other.bbox.x1 <= block.bbox.x1 + reference;
+            if (overlapY || detachedLabel || nearbyLimit) { indices.push(n); bbox = union(bbox, other.bbox); }
         });
         let label;
         const groupedLabel = labelMatch || indices.map(n => blocks[n].text.match(EQUATION_LABEL)).find(Boolean);
@@ -187,8 +206,18 @@ function detectRegions(blocks, { pixels, width, height }) {
         // Project away the now-excluded number and retain actual fraction/limit ink.
         const search = bounded(bbox, width, height, Math.ceil(reference * 0.4));
         if (label) search.x1 = Math.min(search.x1, Math.floor(bbox.x1));
+        // Padding must not introduce ink from the preceding/following equation.
+        // OCR boxes already include the grouped fraction and detached limits.
+        let top = 0, bottom = height;
+        blocks.forEach((other, n) => {
+            if (indices.includes(n) || removed.has(n) || other.bbox.x0 >= bbox.x1 || other.bbox.x1 <= bbox.x0) return;
+            if (other.bbox.y1 <= bbox.y0) top = Math.max(top, Math.ceil((other.bbox.y1 + bbox.y0) / 2));
+            if (other.bbox.y0 >= bbox.y1) bottom = Math.min(bottom, Math.floor((other.bbox.y0 + bbox.y1) / 2));
+        });
+        search.y0 = Math.max(search.y0, top);
+        search.y1 = Math.min(search.y1, bottom);
         const ink = inkBounds(pixels, width, height, search);
-        if (ink) bbox = bounded(ink, width, height, 4);
+        if (ink) bbox = { ...bounded(ink, width, height, 4), y0: Math.max(top, ink.y0 - 4), y1: Math.min(bottom, ink.y1 + 4) };
         displays.push({ kind: 'math', display: true, bbox, label, indices: indices.sort((a, b) => a - b) });
     });
     const displayIndices = new Set(displays.flatMap(display => display.indices));
@@ -246,7 +275,10 @@ function replaceInline(block, regions) {
     return { ...block, runs, text: runs.filter(run => run.type === 'text').map(run => run.text).join('') };
 }
 
-async function processRegions({ blocks, imageBuffer, width, height, bookId, pageNumber, cacheDirectory, recognizeMath }) {
+async function processRegions({ blocks, imageBuffer, width, height, cacheDirectory, imagePrefix, renderRegion, recognizeMath }) {
+    if (!/^\/uploads\/pdf\/[A-Za-z0-9_-]{1,128}\/page-[1-9]\d*-v[1-9]\d*$/.test(imagePrefix)) {
+        throw new Error('Invalid source-region image prefix.');
+    }
     const source = await loadImage(imageBuffer);
     const canvas = createCanvas(width, height);
     const context = canvas.getContext('2d');
@@ -256,7 +288,7 @@ async function processRegions({ blocks, imageBuffer, width, height, bookId, page
     let regionNumber = 0;
     const figures = new Map();
     for (const region of regions.figures) {
-        const filename = `page-${pageNumber}-region-${++regionNumber}.png`;
+        const filename = `${path.basename(imagePrefix)}-region-${++regionNumber}.png`;
         const crop = cropBuffer(source, region.bbox);
         const destination = path.join(cacheDirectory, filename);
         const temporary = `${destination}.${process.pid}.tmp`;
@@ -264,12 +296,13 @@ async function processRegions({ blocks, imageBuffer, width, height, bookId, page
             await fs.promises.writeFile(temporary, crop);
             await fs.promises.rename(temporary, destination);
         } finally { await fs.promises.rm(temporary, { force: true }); }
-        figures.set(region.captionIndex, { type: 'image', kind: 'figure', imageUrl: `/uploads/pdf/${bookId}/${filename}`,
+        figures.set(region.captionIndex, { type: 'image', kind: 'figure', imageUrl: `${imagePrefix}-region-${regionNumber}.png`,
             width: region.bbox.x1 - region.bbox.x0, height: region.bbox.y1 - region.bbox.y0, bbox: region.bbox, alt: region.alt });
     }
     for (const region of [...regions.displays, ...regions.inline]) {
         if (typeof recognizeMath !== 'function') throw new Error('Formula recognition is unavailable. A source-math recognizer is required.');
-        const latex = await recognizeMath({ imageBuffer: cropBuffer(source, region.bbox), bbox: region.bbox, display: region.display });
+        const windowImage = renderRegion ? await renderRegion({ ...region, kind: 'formula' }) : cropBuffer(source, region.bbox);
+        const latex = await recognizeMath({ imageBuffer: windowImage, bbox: region.bbox, display: region.display });
         if (typeof latex !== 'string' || !latex.trim()) throw new Error('Formula recognition returned an empty equation.');
         region.latex = latex.trim();
     }

@@ -6,7 +6,7 @@ const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { ocrBlocks, nativeBlocks, blocksText, validBlocks } = require('./pdf-layout');
+const { nativeBlocks, blocksText, validBlocks } = require('./pdf-layout');
 const { detectRegions, processRegions } = require('./pdf-regions');
 
 function row(text, y, x = 25, size = 10) {
@@ -27,7 +27,13 @@ function row(text, y, x = 25, size = 10) {
 }
 
 function layout(rows) {
-    return ocrBlocks({ blocks: rows.map(line => ({ paragraphs: [{ lines: [line] }] })) });
+    const items = rows.flatMap(line => line.words.map((word, index) => ({
+        str: word.text, width: word.bbox.x1 - word.bbox.x0, fontName: 'body',
+        hasEOL: index === line.words.length - 1,
+        transform: [line.bbox.y1 - line.bbox.y0, 0, 0, line.bbox.y1 - line.bbox.y0, word.bbox.x0, 500 - word.bbox.y1]
+    })));
+    return nativeBlocks({ items, styles: { body: { ascent: 1 } } },
+        { scale: 1, transform: [1, 0, 0, -1, 0, 500] });
 }
 
 function surface(width = 1000, height = 500) {
@@ -59,70 +65,19 @@ test('caption-bounded source crops retain graph axes and labels, suppress OCR ju
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-figure-regression-'));
     try {
         const result = await processRegions({ blocks, imageBuffer: source.canvas.toBuffer('image/png'),
-            width: source.width, height: source.height, bookId: 'fixture', pageNumber: 6, cacheDirectory: directory });
+            width: source.width, height: source.height, imagePrefix: '/uploads/pdf/fixture/page-6-v11', cacheDirectory: directory });
         assert.deepEqual(result.map(block => block.type), ['text', 'image', 'text']);
         assert.equal(result[0].text, blocks[0].text);
         assert.match(result[2].text, /^Figure 8.12:/);
-        assert.equal(result[1].imageUrl, '/uploads/pdf/fixture/page-6-region-1.png');
         assert.ok(result[1].bbox.x0 <= 70 && result[1].bbox.y0 <= 100);
         assert.ok(result[1].bbox.x1 >= 730 && result[1].bbox.y1 >= 335);
         assert.ok(result[1].bbox.y0 > blocks[0].bbox.y1 && result[1].bbox.y1 < blocks[4].bbox.y0);
         assert.doesNotMatch(blocksText(result), /Reward distribution|Action/);
-        const crop = await loadImage(await fs.readFile(path.join(directory, 'page-6-region-1.png')));
+        const crop = await loadImage(await fs.readFile(path.join(directory, path.basename(result[1].imageUrl))));
         assert.equal(crop.width, result[1].width);
         assert.equal(crop.height, result[1].height);
         assert.equal(validBlocks(result, blocksText(result)), true);
     } finally { await fs.rm(directory, { recursive: true, force: true }); }
-});
-
-test('overlapping fraction rows and detached limits become one equation region without neighboring prose or label', () => {
-    const source = surface();
-    const numerator = row('sum of rewards prior to t', 110, 160);
-    const fraction = row('Q(a) = denominator (2.1)', 115, 100);
-    // PDF equation number is a separate, right-aligned source word.
-    const number = fraction.words.at(-1);
-    number.bbox = { x0: 900, y0: 115, x1: 945, y1: 125 };
-    number.symbols.forEach((symbol, index) => { symbol.bbox = { x0: 900 + index * 6, y0: 115, x1: 905 + index * 6, y1: 125 }; });
-    fraction.bbox.x1 = 945;
-    const blocks = layout([
-        row('The following paragraph explains how the sample means are estimated from the observed rewards.', 20),
-        numerator, fraction, row('a', 133, 180),
-        row('The next paragraph continues the discussion with ordinary readable explanatory body prose.', 190)
-    ]);
-    source.context.fillStyle = '#000';
-    source.context.fillRect(100, 110, 400, 35);
-    source.context.fillRect(900, 115, 45, 10);
-    const regions = detect(blocks, source);
-    assert.equal(regions.displays.length, 1);
-    assert.deepEqual(regions.displays[0].indices, [1, 2, 3]);
-    assert.equal(regions.displays[0].label, '(2.1)');
-    assert.ok(regions.displays[0].bbox.x1 < 900);
-    assert.ok(regions.displays[0].bbox.y0 > blocks[0].bbox.y1);
-    assert.ok(regions.displays[0].bbox.y1 < blocks[4].bbox.y0);
-});
-
-test('inline notation regions do not consume surrounding prose or turn equation references into display blocks', () => {
-    const source = surface();
-    const blocks = layout([
-        row('The estimates q*(a), a = 1,...,10, describe the action values in the experiment.', 20),
-        row('The discussion of the mathematical method ends with a reference to equation (2.1).', 100),
-        row('We assess e-greedy selection where the probability is £ = 0.5, and the remaining words stay readable.', 200)
-    ]);
-    const regions = detect(blocks, source);
-    assert.equal(regions.displays.length, 0);
-    const spans = regions.inline.map(region => blocks[region.index].text.slice(region.start, region.end));
-    assert.ok(spans.some(span => span.includes('q*(a)')));
-    assert.ok(spans.some(span => span.includes('a = 1,...,10')));
-    assert.ok(spans.includes('£ = 0.5'));
-    assert.ok(spans.includes('e'));
-    const prefix = regions.inline.find(region => region.index === 2 && blocks[2].text.slice(region.start, region.end) === 'e');
-    assert.equal(prefix.start, blocks[2].text.indexOf('e-greedy'));
-    assert.equal(prefix.end, prefix.start + 1);
-    for (const region of regions.inline) {
-        const span = blocks[region.index].text.slice(region.start, region.end);
-        assert.doesNotMatch(span, /estimates|describe|discussion|remaining|greedy/);
-        assert.ok(region.end - region.start < blocks[region.index].text.length / 2);
-    }
 });
 
 test('native math-font items retain no-space inline grouping and exclude a detached right-hand equation number', () => {
@@ -148,4 +103,47 @@ test('native math-font items retain no-space inline grouping and exclude a detac
     assert.equal(regions.displays.length, 1);
     assert.equal(regions.displays[0].label, '(9.3)');
     assert.ok(regions.displays[0].bbox.x1 < 900);
+});
+
+test('display grouping does not consume a same-height paragraph in another column', () => {
+    const source = surface();
+    const blocks = layout([
+        row('This explanatory paragraph establishes the normal body margin and the usual font size for this page.', 20),
+        row('F(x) = 0', 100, 100),
+        row('A short separate heading', 100, 600)
+    ]);
+    const regions = detect(blocks, source);
+    assert.deepEqual(regions.displays.map(region => region.indices), [[1]]);
+    assert.ok(regions.displays[0].bbox.x1 < blocks[2].bbox.x0);
+});
+
+test('source crop padding excludes ink belonging to the next assignment', () => {
+    const source = surface();
+    // Build independently segmented native paragraphs: page layout may legitimately
+    // merge two flush-left formula rows into a single multiline equation.
+    const blocks = [
+        ...layout([row('This explanatory paragraph establishes the normal body margin and the usual font size for this page.', 20)]),
+        ...layout([row('F(x) = 0', 100, 100)]),
+        ...layout([row('G(x) = 1', 112, 100)])
+    ];
+    source.context.fillStyle = '#000';
+    for (const block of blocks.slice(1)) {
+        source.context.fillRect(block.bbox.x0, block.bbox.y0, block.bbox.x1 - block.bbox.x0, block.bbox.y1 - block.bbox.y0);
+    }
+    const regions = detect(blocks, source);
+    assert.equal(regions.displays.length, 2);
+    assert.ok(regions.displays[0].bbox.y1 <= blocks[2].bbox.y0);
+    assert.ok(regions.displays[1].bbox.y0 >= blocks[1].bbox.y1);
+});
+
+test('a detached upper summation limit attaches to the closer equation, not the preceding row', () => {
+    const source = surface();
+    const blocks = layout([
+        row('This explanatory paragraph establishes the normal body margin and the usual font size for this page.', 20),
+        row('F(x) = x', 100, 100),
+        row('n', 120, 140, 5),
+        row('G(x) = ∑ x', 130, 100)
+    ]);
+    const regions = detect(blocks, source);
+    assert.deepEqual(regions.displays.map(region => region.indices), [[1], [2, 3]]);
 });

@@ -3,6 +3,17 @@ node_modules/
 **/node_modules/**
 package-lock.json
 
+# Python virtual environments and caches
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.pyc
+
+# Project notes / todos
+todo.txt
+**/todo.txt
+
 # Environment & Sensitive Configs
 .env
 .env.*
