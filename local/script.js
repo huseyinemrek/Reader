@@ -535,6 +535,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         releaseBook();
         readerView.style.display = 'none';
         libraryView.classList.add('active');
+        libraryView.style.display = 'block';
         closeSidebar(settingsSidebar);
         closeSidebar(tocSidebar);
         document.title = 'Premium Edge Reader';
@@ -1056,6 +1057,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (originalPdfSetting) originalPdfSetting.hidden = currentBookType !== 'pdf';
             if (currentBookType === 'pdf' && openOriginalPdf) openOriginalPdf.href = book.bookUrl;
             libraryView.classList.remove('active');
+            libraryView.style.display = 'none';
             readerView.style.display = 'block';
             applySettings();
             const saved = book.readerPosition;

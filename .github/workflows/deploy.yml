@@ -32,6 +32,18 @@ jobs:
             cd local
             npm install --omit=dev
 
+            # uv ve OCR ortamı eksikse otomatik hazırla
+            if ! command -v uv > /dev/null 2>&1 && [ ! -f "$HOME/.local/bin/uv" ]; then
+                echo "--- uv kuruluyor ---"
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+            fi
+            export PATH="$HOME/.local/bin:$PATH"
+
+            if [ ! -d ".venv-ocr" ]; then
+                echo "--- Belge OCR ortamı ve modelleri hazırlanıyor ---"
+                npm run ocr:setup
+            fi
+
             echo "--- PM2 servisi yeniden başlatılıyor ---"
             if pm2 describe reader > /dev/null 2>&1; then
                 pm2 restart reader --update-env
