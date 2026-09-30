@@ -1,9 +1,104 @@
+// --- Firebase Auth Entegrasyonu ---
+let auth = null;
+let signInWithEmailAndPassword = null;
+let createUserWithEmailAndPassword = null;
+let signOut = null;
+let onAuthStateChanged = null;
+
+try {
+    const fb = await import('./firebase-config.js');
+    auth = fb.auth;
+    const authModule = await import("https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js");
+    signInWithEmailAndPassword = authModule.signInWithEmailAndPassword;
+    createUserWithEmailAndPassword = authModule.createUserWithEmailAndPassword;
+    signOut = authModule.signOut;
+    onAuthStateChanged = authModule.onAuthStateChanged;
+} catch (e) {
+    console.warn("Firebase Auth modülü yüklenemedi:", e.message);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    // --- Initial Config ---
+    // --- Initial Config & Auth State ---
+    let currentUser = null;
+
+    const authModal = document.getElementById('auth-modal');
+    const authForm = document.getElementById('auth-form');
+    const authEmail = document.getElementById('auth-email');
+    const authPassword = document.getElementById('auth-password');
+    const authSubmitBtn = document.getElementById('auth-submit-btn');
+    const authError = document.getElementById('auth-error');
+    const userEmailDisplay = document.getElementById('user-email-display');
+    const logoutBtn = document.getElementById('logout-btn');
+
+    async function getAuthToken() {
+        if (!currentUser) return null;
+        try {
+            return await currentUser.getIdToken();
+        } catch (_) {
+            return null;
+        }
+    }
+
+    async function authFetch(url, options = {}) {
+        const token = await getAuthToken();
+        const headers = new Headers(options.headers || {});
+        if (token) {
+            headers.set('Authorization', 'Bearer ' + token);
+        }
+        const response = await fetch(url, { ...options, headers });
+        if (response.status === 401 && currentUser) {
+            if (signOut && auth) await signOut(auth);
+            throw new Error('Oturum süresi doldu. Lütfen tekrar giriş yapın.');
+        }
+        return response;
+    }
+
+    if (authForm) {
+        authForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!auth || !signInWithEmailAndPassword) {
+                alert('Firebase Auth yapılandırması bulunamadı.');
+                return;
+            }
+            const email = authEmail.value.trim();
+            const password = authPassword.value;
+            authError.style.display = 'none';
+            authSubmitBtn.innerText = 'İşleniyor...';
+            authSubmitBtn.disabled = true;
+
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+            } catch (signInErr) {
+                if (signInErr.code === 'auth/user-not-found' || signInErr.code === 'auth/invalid-credential') {
+                    try {
+                        await createUserWithEmailAndPassword(auth, email, password);
+                    } catch (signUpErr) {
+                        authError.innerText = 'Giriş / Kayıt başarısız: ' + signUpErr.message;
+                        authError.style.display = 'block';
+                    }
+                } else {
+                    authError.innerText = 'Hata: ' + signInErr.message;
+                    authError.style.display = 'block';
+                }
+            } finally {
+                authSubmitBtn.innerText = 'Giriş Yap';
+                authSubmitBtn.disabled = false;
+            }
+        });
+    }
+
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', async () => {
+            if (auth && signOut) {
+                closeReader();
+                await signOut(auth);
+            }
+        });
+    }
+
     let currentBookId = null;
     let scrollSaveTimeout = null;
     let globalLibrary = []; // API'den gelen kitapları tutar
-    
     // Page counts are measured per chapter; no archive or chapter HTML cache.
     let currentBookType = null;
     let epubSpine = [];
@@ -307,7 +402,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function loadLibrary() {
         libraryGrid.innerHTML = '';
         try {
-            const res = await fetch('/api/books');
+            const res = await authFetch('/api/books');
             globalLibrary = await res.json();
             
             if (globalLibrary.length === 0) {
@@ -356,14 +451,14 @@ document.addEventListener('DOMContentLoaded', () => {
     window.deleteBook = async (e, id) => {
         e.stopPropagation(); // prevent opening book
         if(confirm("Bu kitabı kütüphaneden silmek istediğinize emin misiniz?")) {
-            await fetch(`/api/books/${id}`, { method: 'DELETE' });
+            await authFetch(`/api/books/${id}`, { method: 'DELETE' });
             loadLibrary();
         }
     };
 
     deleteBookBtn.addEventListener('click', async () => {
         if(currentBookId && confirm("Şu an okuduğunuz kitabı silmek istediğinize emin misiniz?")) {
-            await fetch(`/api/books/${currentBookId}`, { method: 'DELETE' });
+            await authFetch(`/api/books/${currentBookId}`, { method: 'DELETE' });
             closeReader();
         }
     });
@@ -502,7 +597,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const book = globalLibrary.find(b => b.id === id);
         if (book) Object.assign(book, data);
         progressWrite = progressWrite.catch(() => {}).then(async () => {
-            const response = await fetch('/api/books/' + id + '/progress', {
+            const response = await authFetch('/api/books/' + id + '/progress', {
                 method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data), keepalive: true
             });
             if (!response.ok) throw new Error('Okuma konumu kaydedilemedi.');
@@ -903,7 +998,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 await loadEpubSpine();
             } else if (fileName.endsWith('.pdf')) {
                 currentBookType = 'pdf';
-                const loadingTask = pdfjsLib.getDocument({...pdfResources, url: book.bookUrl, disableAutoFetch: true, disableStream: true});
+                const authToken = await getAuthToken();
+                const httpHeaders = authToken ? { Authorization: 'Bearer ' + authToken } : {};
+                const loadingTask = pdfjsLib.getDocument({...pdfResources, url: book.bookUrl, httpHeaders, disableAutoFetch: true, disableStream: true});
                 currentPdfLoadingTask = loadingTask;
                 const pdf = await loadingTask.promise;
                 if (token !== session) return;
@@ -911,8 +1008,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 totalBookPages = totalPdfPages = pdf.numPages;
             } else {
                 currentBookType = 'html';
-                const response = await fetch(book.bookUrl, {signal: sessionAbort.signal});
-                if (!response.ok) throw new Error('Kitap dosyası alınamadı.');
+                const response = await authFetch(book.bookUrl, {signal: sessionAbort.signal});
                 if (/\.(htmlz|zip)$/.test(fileName)) {
                     const zip = await JSZip.loadAsync(await response.arrayBuffer());
                     const main = Object.keys(zip.files).find(name => /\.html?$/.test(name));
@@ -1021,7 +1117,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 formData.append('coverBlob', coverBlob, 'cover.jpg');
             }
 
-            const res = await fetch('/api/books', {
+            const res = await authFetch('/api/books', {
                 method: 'POST',
                 body: formData
             });
@@ -1111,7 +1207,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchText(url, signal = sessionAbort.signal) {
-        const response = await fetch(url, {signal});
+        const response = await authFetch(url, {signal});
         if (!response.ok) {
             const error = new Error('Kitap kaynağı alınamadı (' + response.status + '): ' + decodeURIComponent(url.split('/').at(-1)));
             error.status = response.status;
@@ -1424,7 +1520,7 @@ document.addEventListener('DOMContentLoaded', () => {
             ' · İlk kullanımda yerel model indirilip yüklenebilir; orijinal PDF gerçek zamanlı işlenir ve bağımsız olarak kullanılabilir.';
         text.setAttribute('aria-busy', 'true');
         try {
-            const response = await fetch('/api/books/' + encodeURIComponent(bookId) +
+            const response = await authFetch('/api/books/' + encodeURIComponent(bookId) +
                 '/pdf/pages/' + pageNumber + (forceOcr ? '?ocr=1' : ''), {signal});
             const result = await response.json();
             if (!response.ok) throw new Error(result.error || 'PDF metni hazırlanamadı.');
@@ -1558,6 +1654,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return text;
     }
     async function handleRouting() {
+        if (auth && !currentUser) return;
         const path = window.location.pathname;
         const bookMatch = path.match(/^\/book\/(book_[a-zA-Z0-9_]+)$/);
         
@@ -1565,7 +1662,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const bookId = bookMatch[1];
             if (globalLibrary.length === 0) {
                 try {
-                    const res = await fetch('/api/books');
+                    const res = await authFetch('/api/books');
                     globalLibrary = await res.json();
                 } catch (e) {
                     console.error("Kitaplar yüklenemedi:", e);
@@ -1893,11 +1990,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
     ttsCloseBtn.addEventListener('click', stopTTS);
 
-    // --- Init ---
+    // --- Init & Auth Observer ---
     loadSettings();
-    handleRouting();
+
+    if (auth && onAuthStateChanged) {
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUser = user;
+                if (authModal) authModal.style.display = 'none';
+                if (userEmailDisplay) {
+                    userEmailDisplay.innerText = user.email || 'Kullanıcı';
+                    userEmailDisplay.style.display = 'inline-block';
+                }
+                if (logoutBtn) logoutBtn.style.display = 'inline-flex';
+                libraryView.style.display = 'block';
+                await loadLibrary();
+                handleRouting();
+            } else {
+                currentUser = null;
+                closeReader();
+                if (authModal) authModal.style.display = 'flex';
+                if (userEmailDisplay) userEmailDisplay.style.display = 'none';
+                if (logoutBtn) logoutBtn.style.display = 'none';
+                libraryView.style.display = 'none';
+                readerView.style.display = 'none';
+                globalLibrary = [];
+            }
+        });
+    } else {
+        libraryView.style.display = 'block';
+        loadLibrary();
+        handleRouting();
+    }
 
     window.addEventListener('popstate', () => {
+        if (auth && !currentUser) return;
         handleRouting();
     });
 });

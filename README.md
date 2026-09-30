@@ -29,6 +29,8 @@ Proje ihtiyacınıza göre iki farklı çalışma modeline sahiptir:
 reader/
 ├── local/                      # Yerel Node.js / Express sürümü
 │   ├── server.js               # Express API ve statik dosya sunucusu
+│   ├── firebase-auth.js        # Firebase Auth ID Token (RS256) doğrulama katmanı
+│   ├── firebase-config.example.js # Firebase Web SDK yapılandırma şablonu
 │   ├── package.json            # Sunucu, PDF çizimi ve yerel OCR bağımlılıkları
 │   ├── pdf-ocr.js              # PDF çıkarımı, belge OCR entegrasyonu ve sürümlü önbellek
 │   ├── pdf-windows.js          # Tüm metin/formüller için uyarlanabilir kaynak PDF pencereleri
@@ -71,12 +73,12 @@ reader/
 
 ### 1. Yerel Sürüm (`local/`)
 
-Kendi bilgisayarınızda veya ev ağınızdaki cihazlarda paylaşmak için:
-Node.js 24 LTS önerilir (desteklenen sürümler: 22.x dalında 22.13+ veya 24+).
-
+Kendi bilgisayarınızda veya VPS sunucunuzda çalıştırmak için:
+Node.js 22 LTS veya 24 LTS önerilir.
 
 ```bash
 cd local
+cp firebase-config.example.js firebase-config.js # Firebase proje bilgilerinizi girin
 npm install
 npm start
 ```

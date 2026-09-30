@@ -24,14 +24,36 @@
 </head>
 <body>
     
+    <!-- Auth Modal (Login/Signup) -->
+    <div id="auth-modal" class="auth-overlay" style="display: none;">
+        <div class="auth-card glass-panel">
+            <h2 id="auth-title"><i class="fa-solid fa-book-open-reader"></i> Edge Reader</h2>
+            <p id="auth-subtitle">Kitaplarınıza her cihazdan erişmek için hesabınıza giriş yapın.</p>
+            
+            <form id="auth-form">
+                <input type="email" id="auth-email" placeholder="E-posta Adresi" required autocomplete="email">
+                <input type="password" id="auth-password" placeholder="Şifre" required autocomplete="current-password">
+                <button type="submit" id="auth-submit-btn" class="upload-btn">Giriş Yap</button>
+            </form>
+            
+            <div id="auth-error" class="auth-error" style="display: none;"></div>
+        </div>
+    </div>
+
     <!-- Library View -->
-    <div id="library-view" class="active">
+    <div id="library-view" style="display: none;">
         <header class="library-header glass-panel">
             <h1><i class="fa-solid fa-book-open-reader"></i> Kütüphanem</h1>
-            <label for="book-upload" class="upload-btn">
-                <i class="fa-solid fa-plus"></i> Yeni Kitap Ekle
-            </label>
-            <input type="file" id="book-upload" accept=".epub,.pdf,.html,.htm,.htmlz,.zip" style="display: none;">
+            <div class="library-actions">
+                <span id="user-email-display" class="user-email" style="display: none;"></span>
+                <label for="book-upload" class="upload-btn">
+                    <i class="fa-solid fa-plus"></i> Yeni Kitap Ekle
+                </label>
+                <button id="logout-btn" class="upload-btn logout-btn" title="Çıkış Yap" style="display: none;">
+                    <i class="fa-solid fa-right-from-bracket"></i> Çıkış
+                </button>
+                <input type="file" id="book-upload" accept=".epub,.pdf,.html,.htm,.htmlz,.zip" style="display: none;">
+            </div>
         </header>
         
         <div id="loading-overlay" style="display: none;">
@@ -285,6 +307,6 @@
     </dialog>
 
     <script src="/pdf-viewer.js"></script>
-    <script src="/script.js"></script>
+    <script type="module" src="/script.js"></script>
 </body>
 </html>

@@ -867,6 +867,107 @@ select option {
     }
 }
 
+/* --- KİMLİK DOĞRULAMA (AUTH) --- */
+.auth-overlay {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    z-index: 10000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.auth-card {
+    padding: 40px;
+    width: 90%;
+    max-width: 420px;
+    text-align: center;
+    border-radius: 16px;
+    background: rgba(25, 27, 34, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+}
+
+.auth-card h2 {
+    margin-bottom: 10px;
+    color: var(--ui-text);
+    font-size: 1.8rem;
+}
+
+.auth-card p {
+    color: var(--ui-text);
+    opacity: 0.8;
+    margin-bottom: 25px;
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+#auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+#auth-form input {
+    padding: 12px 15px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.3);
+    color: white;
+    font-family: inherit;
+    font-size: 1rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+#auth-form input:focus {
+    outline: none;
+    border-color: var(--ui-primary);
+    box-shadow: 0 0 0 2px rgba(92, 107, 192, 0.3);
+}
+
+#auth-submit-btn {
+    margin-top: 10px;
+    width: 100%;
+    font-size: 1.1rem;
+}
+
+.auth-error {
+    margin-top: 15px;
+    padding: 12px;
+    background: rgba(229, 57, 53, 0.2);
+    border: 1px solid #e53935;
+    color: #ff5252;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    text-align: left;
+}
+
+.library-actions {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+.user-email {
+    font-size: 0.9rem;
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.1);
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.logout-btn {
+    background: #d32f2f !important;
+}
+
+.logout-btn:hover {
+    background: #b71c1c !important;
+}
+
 /* --- KÜTÜPHANE GÖRÜNÜMÜ --- */
 #library-view {
     display: none;
@@ -877,7 +978,6 @@ select option {
 #library-view.active {
     display: block;
 }
-
 .library-header {
     display: flex;
     justify-content: space-between;

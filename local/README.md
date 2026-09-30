@@ -26,16 +26,21 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
    npm install
    ```
 
-2. PDF OCR kullanacaksanız ortamı ve modelleri hazırlayın:
+2. Kimlik Doğrulama (Firebase Auth) Yapılandırması:
+   Sunucuyu güvenli çalıştırmak için Firebase Auth yapılandırmasını hazırlayın:
+   ```bash
+   cp firebase-config.example.js firebase-config.js
+   ```
+   `firebase-config.js` dosyasını kendi Firebase Konsolunuzdaki Web App ayarlarıyla doldurun. Alternatif olarak `.env.example` dosyasını `.env` olarak kopyalayıp `FIREBASE_PROJECT_ID=YOUR_PROJECT_ID` belirtebilirsiniz.
+
+3. PDF OCR kullanacaksanız ortamı ve modelleri hazırlayın (isteğe bağlı):
    ```bash
    npm run ocr:setup
    ```
    Sistem GPU ve mimariyi otomatik algılar:
    - **CUDA Destekli NVIDIA GPU (x64):** Otomatik olarak CUDA 12.8 destekli PyTorch kurulur.
-   - **CPU / ARM64 (örn. Oracle Cloud Ampere A1, Apple Silicon, VPS):** Otomatik olarak standart CPU PyTorch kurulur. Dilerseniz doğrudan `npm run ocr:setup:cpu` komutunu da kullanabilirsiniz.
+   - **CPU / ARM64 (örn. Oracle Cloud Ampere A1, Apple Silicon, VPS):** Standart CPU PyTorch kurulur (`npm run ocr:setup:cpu`).
    Python ortamı `local/.venv-ocr/` altına kurulur. İlk kurulum modelleri indirmek için internet bağlantısı ve disk alanı gerektirir.
-3. (İsteğe bağlı) `.env.example` dosyasını `.env` olarak kopyalayın. `PORT` ve `OCR_DEVICE` ayarlarını değiştirebilirsiniz.
-
 4. Sunucuyu başlatın:
    ```bash
    npm start
@@ -43,8 +48,35 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
 
 5. Tarayıcınızda açın:
    - Bilgisayarınızdan: `http://localhost:3000`
-   - Telefon veya tabletinizden: Konsolda gösterilen yerel IP adresi (örn. `http://192.168.1.X:3000`)
+   - VPS / Uzak Sunucudan: `http://<SENIN_VPS_IP>:3000`
+---
 
+## ☁️ VPS & GitHub Actions ile Otomatik Dağıtım (CI/CD)
+
+Okuyucuyu 7/24 çalışan bir VPS (örn. Oracle Cloud Ampere A1, Ubuntu VPS vb.) üzerinde otomatik dağıtmak için:
+
+1. **VPS Hazırlığı:**
+   ```bash
+   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+   sudo apt-get install -y nodejs git
+   sudo npm install -g pm2
+   git clone <REPO_URL> ~/reader
+   cd ~/reader/local
+   cp firebase-config.example.js firebase-config.js # Bilgilerinizi girin
+   npm install --omit=dev
+   pm2 start server.js --name reader
+   pm2 save
+   pm2 startup
+   ```
+
+2. **GitHub Repository Secrets Tanımlama:**
+   GitHub deponuzda **Settings -> Secrets and variables -> Actions** bölümüne gidin:
+   - `VPS_HOST`: `<SENIN_VPS_IP>`
+   - `VPS_USER`: `<SENIN_SSH_KULLANICI_ADIN>` (örn. `ubuntu` veya `opc`)
+   - `VPS_SSH_KEY`: VPS SSH Özel Anahtarı (`-----BEGIN OPENSSH PRIVATE KEY----- ...`)
+   - `VPS_PORT`: `22` (isteğe bağlı, varsayılan 22)
+
+3. Artık depoya her `git push origin main` yaptığınızda GitHub Actions otomatik olarak sunucunuza bağlanıp uygulamayı günceller ve yeniden başlatır.
 ## PDF ve OCR
 
 PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Orijinal sayfa tarayıcıda PDF.js ile doğrudan PDF kaynağından çizilir; OCR sonucunu beklemez. Yakınlaştırma düğmeleriyle %500'e kadar büyütebilir, sayfaya sığdırabilir ve görüntüyü kaydırabilirsiniz. Görünen alan cihaz piksel oranında yeniden çizilir; her çizim parçası en fazla 1024 × 1024 fiziksel pikseldir. Kaynak PDF taranmış bir fotoğrafsa renderer kaybolmuş ayrıntıları geri getiremez. Seçilebilir metin sağda hazırlanır; dar ekranlarda karşılaştırma alanı yatay kaydırılır.

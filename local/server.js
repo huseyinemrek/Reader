@@ -6,7 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const yauzl = require('yauzl');
 const createPdfOcr = require('./pdf-ocr');
+const { createAuthMiddleware } = require('./firebase-auth');
 
+const requireAuth = createAuthMiddleware();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -103,7 +105,8 @@ function getEpubEntryMimeType(entryName) {
 }
 
 function serveEpubEntry(req, res) {
-    const book = library.find(item => item.id === req.params.id);
+    const userUid = req.user ? req.user.uid : null;
+    const book = library.find(item => item.id === req.params.id && (!item.userId || item.userId === userUid));
     if (!book) {
         return res.status(404).json({ error: "Kitap bulunamadı." });
     }
@@ -265,10 +268,11 @@ function serveEpubEntry(req, res) {
 }
 
 // API: EPUB arşivinden tek bir kaynağı akış olarak getir
-app.get('/api/books/:id/epub', serveEpubEntry);
-app.get('/api/books/:id/epub/*', serveEpubEntry);
-app.get('/api/books/:id/pdf/pages/:page', async (req, res) => {
-    const book = library.find(candidate => candidate.id === req.params.id);
+app.get('/api/books/:id/epub', requireAuth, serveEpubEntry);
+app.get('/api/books/:id/epub/*', requireAuth, serveEpubEntry);
+app.get('/api/books/:id/pdf/pages/:page', requireAuth, async (req, res) => {
+    const userUid = req.user.uid;
+    const book = library.find(candidate => candidate.id === req.params.id && (!candidate.userId || candidate.userId === userUid));
     if (!book) {
         return res.status(404).json({ error: 'Kitap bulunamadı.' });
     }
@@ -306,14 +310,20 @@ app.get('/api/books/:id/pdf/pages/:page', async (req, res) => {
     }
 });
 
-// API: Tüm kitapları getir
+// API: Kullanıcı bilgilerini doğrula
+app.get('/api/auth/me', requireAuth, (req, res) => {
+    res.json({ user: req.user });
+});
 
-app.get('/api/books', (req, res) => {
-    res.json(library);
+// API: Kullanıcının kitaplarını getir
+app.get('/api/books', requireAuth, (req, res) => {
+    const userUid = req.user.uid;
+    const userBooks = library.filter(book => !book.userId || book.userId === userUid);
+    res.json(userBooks);
 });
 
 // API: Yeni kitap yükle
-app.post('/api/books', upload.fields([{ name: 'bookFile', maxCount: 1 }, { name: 'coverBlob', maxCount: 1 }]), (req, res) => {
+app.post('/api/books', requireAuth, upload.fields([{ name: 'bookFile', maxCount: 1 }, { name: 'coverBlob', maxCount: 1 }]), (req, res) => {
     try {
         const title = req.body.title || 'Bilinmeyen Kitap';
         const fileName = req.body.fileName || 'book.epub';
@@ -342,6 +352,7 @@ app.post('/api/books', upload.fields([{ name: 'bookFile', maxCount: 1 }, { name:
 
         const newBook = {
             id,
+            userId: req.user.uid,
             title,
             fileName: safeFileName,
             bookUrl: `/uploads/${safeFileName}`,
@@ -365,10 +376,11 @@ app.post('/api/books', upload.fields([{ name: 'bookFile', maxCount: 1 }, { name:
 });
 
 // API: Okuma ilerlemesini güncelle
-app.put('/api/books/:id/progress', (req, res) => {
+app.put('/api/books/:id/progress', requireAuth, (req, res) => {
     const { id } = req.params;
+    const userUid = req.user.uid;
     const body = req.body && typeof req.body === 'object' ? req.body : {};
-    const book = library.find(b => b.id === id);
+    const book = library.find(b => b.id === id && (!b.userId || b.userId === userUid));
 
     if (!book) {
         return res.status(404).json({ error: "Kitap bulunamadı." });
@@ -399,9 +411,10 @@ app.put('/api/books/:id/progress', (req, res) => {
 });
 
 // API: Kitap sil
-app.delete('/api/books/:id', async (req, res) => {
+app.delete('/api/books/:id', requireAuth, async (req, res) => {
     const { id } = req.params;
-    const bookIndex = library.findIndex(b => b.id === id);
+    const userUid = req.user.uid;
+    const bookIndex = library.findIndex(b => b.id === id && (!b.userId || b.userId === userUid));
 
     if (bookIndex === -1) {
         return res.status(404).json({ error: 'Kitap bulunamadı.' });
