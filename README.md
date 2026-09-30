@@ -18,6 +18,7 @@ Proje ihtiyacınıza göre iki farklı çalışma modeline sahiptir:
 - 🔤 **Gelişmiş Tipografi:** Yazı tipi ailesi (Inter, Outfit, Lora, Sistem varsayılanı), boyut, satır yüksekliği, sayfa kenar boşlukları ve paragraf aralığı ayarları.
 - 📑 **İçindekiler (TOC):** Bölümler arasında tek tıkla gezinme.
 - 📑 **PDF & EPUB Hibrit Desteği:** EPUB arşivlerini doğrudan istemcide açabilme ve PDF dosyalarını optimize edilmiş parça yükleme ile okuma.
+- **Yerel PDF OCR (`local/`):** Taranmış sayfalar yerel Tesseract ile okunur; orijinal görsel ve paragraf yapılı metin yan yana gösterilir. Ölçülen göreli font boyutları korunur; OCR ölçümleri yaklaşık değerlerdir. İngilizce/Türkçe modeller kurulumla gelir, çalışma sırasında bulut OCR servisi gerekmez. Firebase sürümü değişmez.
 
 ---
 
@@ -27,7 +28,9 @@ Proje ihtiyacınıza göre iki farklı çalışma modeline sahiptir:
 reader/
 ├── local/                      # Yerel Node.js / Express sürümü
 │   ├── server.js               # Express API ve statik dosya sunucusu
-│   ├── package.json            # Sunucu bağımlılıkları (express, multer, cors, yauzl)
+│   ├── package.json            # Sunucu, PDF çizimi ve yerel OCR bağımlılıkları
+│   ├── pdf-ocr.js              # PDF sayfa görselleri, Tesseract OCR ve disk önbelleği
+│   ├── pdf-layout.js           # Paragraf sınırları ve göreli font ölçüleri
 │   ├── index.html              # Okuyucu arayüzü
 │   ├── script.js               # İstemci mantığı (yerel API entegreli)
 │   ├── style.css               # Tema ve okuyucu stilleri
@@ -63,6 +66,8 @@ reader/
 ### 1. Yerel Sürüm (`local/`)
 
 Kendi bilgisayarınızda veya ev ağınızdaki cihazlarda paylaşmak için:
+Node.js 24 LTS önerilir (desteklenen sürümler: 22.x dalında 22.13+ veya 24+).
+
 
 ```bash
 cd local

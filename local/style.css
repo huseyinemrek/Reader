@@ -155,12 +155,12 @@ body {
 
 /* Typography Overrides */
 #book-content[data-font="custom"],
-#book-content[data-font="custom"] * {
+#book-content[data-font="custom"] :not(.katex, .katex *) {
     font-family: var(--font-family) !important;
 }
 
 #book-content[data-line-height="custom"],
-#book-content[data-line-height="custom"] * {
+#book-content[data-line-height="custom"] :not(.katex, .katex *) {
     line-height: var(--line-height) !important;
 }
 
@@ -282,9 +282,8 @@ body {
 
 /* PDF Paged Mode */
 #reader-view.paged-mode #book-viewport.pdf-paged-viewport {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: min(calc(var(--max-width) * 2), calc(100vw - 40px));
+    display: block;
     overflow-y: auto;
 }
 
@@ -307,6 +306,104 @@ body {
 #reader-view.paged-mode .pdf-page.active-pdf-page {
     display: block !important;
     margin: 0 auto;
+}
+
+.pdf-page {
+    width: 100%;
+}
+
+#book-content.pdf-content {
+    max-width: min(calc(var(--max-width) * 2), calc(100vw - 40px)) !important;
+    padding: 24px !important;
+}
+
+.pdf-page-comparison {
+    overflow-x: auto;
+}
+
+.pdf-page-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 24px;
+    min-width: 680px;
+}
+
+.pdf-page-tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font: 14px/1.5 system-ui, sans-serif;
+    margin-bottom: 16px;
+}
+
+#book-content .pdf-page-image {
+    display: block;
+    width: 100%;
+    max-height: none;
+    margin: 0;
+    border-radius: 0;
+}
+
+.pdf-page-text {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+#book-content .pdf-text-block {
+    margin: 0 0 var(--paragraph-spacing);
+}
+
+#reader-view.paged-mode #book-content .pdf-page-image {
+    width: 100%;
+    max-height: none;
+}
+
+#book-content .pdf-figure {
+    margin: 1em 0;
+}
+
+#book-content .pdf-figure img {
+    display: block;
+    width: 100%;
+    max-height: none;
+    margin: 0;
+    border-radius: 0;
+}
+
+.pdf-math {
+    color: inherit;
+    cursor: copy;
+    white-space: nowrap;
+}
+
+.pdf-math .katex {
+    font-size: 1em;
+}
+
+.pdf-math:focus-visible {
+    outline: 2px solid var(--ui-primary);
+    outline-offset: 4px;
+}
+
+.pdf-equation {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    overflow-x: auto;
+    margin: 1em 0;
+}
+
+.pdf-equation .pdf-math {
+    flex: 1;
+    min-width: max-content;
+}
+
+.pdf-equation-number {
+    flex: none;
 }
 
 /* Navigation Buttons for Paged Mode */

@@ -5,6 +5,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const yauzl = require('yauzl');
+const createPdfOcr = require('./pdf-ocr');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,6 +21,8 @@ const DB_FILE = path.join(__dirname, 'library.json');
 // Klasörleri oluştur
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
+
+const pdfOcr = createPdfOcr(UPLOADS_DIR);
 
 // Veritabanını yükle
 let library = [];
@@ -264,6 +267,45 @@ function serveEpubEntry(req, res) {
 // API: EPUB arşivinden tek bir kaynağı akış olarak getir
 app.get('/api/books/:id/epub', serveEpubEntry);
 app.get('/api/books/:id/epub/*', serveEpubEntry);
+app.get('/api/books/:id/pdf/pages/:page', async (req, res) => {
+    const book = library.find(candidate => candidate.id === req.params.id);
+    if (!book) {
+        return res.status(404).json({ error: 'Kitap bulunamadı.' });
+    }
+
+    const fileName = book.fileName;
+    if (typeof fileName !== 'string' || !fileName.toLowerCase().endsWith('.pdf')) {
+        return res.status(415).json({ error: 'Bu kitap bir PDF değil.' });
+    }
+    if (typeof book.id !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(book.id) ||
+        fileName !== path.basename(fileName) ||
+        /[\\/]/.test(fileName) ||
+        !fileName.startsWith(`${book.id}_`) ||
+        book.bookUrl !== `/uploads/${fileName}`) {
+        return res.status(400).json({ error: 'PDF dosyası için güvenli kitap yolu bulunamadı.' });
+    }
+
+    if (!/^[1-9]\d*$/.test(req.params.page) || !Number.isSafeInteger(Number(req.params.page))) {
+        return res.status(400).json({ error: 'Geçersiz sayfa numarası.' });
+    }
+
+    try {
+        const result = await pdfOcr.getPdfPage({
+            bookId: book.id,
+            pdfPath: path.join(UPLOADS_DIR, fileName),
+            page: Number(req.params.page),
+            forceOcr: req.query.ocr === '1'
+        });
+        return res.json(result);
+    } catch (error) {
+        const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+        return res.status(statusCode).json({
+            error: error.message || 'PDF sayfası işlenemedi.'
+        });
+    }
+});
+
 // API: Tüm kitapları getir
 
 app.get('/api/books', (req, res) => {
@@ -357,25 +399,33 @@ app.put('/api/books/:id/progress', (req, res) => {
 });
 
 // API: Kitap sil
-app.delete('/api/books/:id', (req, res) => {
+app.delete('/api/books/:id', async (req, res) => {
     const { id } = req.params;
     const bookIndex = library.findIndex(b => b.id === id);
 
-    if (bookIndex !== -1) {
-        const book = library[bookIndex];
-        
-        // Dosyaları sil
-        try {
-            if (book.bookUrl) fs.unlinkSync(path.join(__dirname, book.bookUrl));
-            if (book.coverUrl) fs.unlinkSync(path.join(__dirname, book.coverUrl));
-        } catch(e) { console.warn("Dosya silinemedi:", e.message); }
-
-        library.splice(bookIndex, 1);
-        saveDB();
-        res.json({ success: true });
-    } else {
-        res.status(404).json({ error: "Kitap bulunamadı." });
+    if (bookIndex === -1) {
+        return res.status(404).json({ error: 'Kitap bulunamadı.' });
     }
+
+    const book = library[bookIndex];
+    library.splice(bookIndex, 1);
+    try {
+        saveDB();
+        // Stop new requests before waiting for queued work, then remove this book's cached pages.
+        await pdfOcr.deleteBookCache(id);
+    } catch (error) {
+        console.error('Book deletion error:', error);
+        return res.status(500).json({ error: 'Kitap silinirken hata oluştu.' });
+    }
+
+    try {
+        if (book.bookUrl) fs.unlinkSync(path.join(__dirname, book.bookUrl));
+        if (book.coverUrl) fs.unlinkSync(path.join(__dirname, book.coverUrl));
+    } catch (error) {
+        console.warn('Dosya silinemedi:', error.message);
+    }
+
+    return res.json({ success: true });
 });
 // API kitap yolları hiçbir zaman istemci uygulaması geri dönüşüne düşmez
 app.get('/api/books/:id/*', (req, res) => {
@@ -401,7 +451,7 @@ function getLocalIP() {
     return '127.0.0.1';
 }
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     const localIp = getLocalIP();
     console.log(`\n=================================================`);
     console.log(`📚 Premium Edge Reader Sunucusu Çalışıyor!`);
@@ -410,3 +460,18 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`👉 Telefonunuzdan erişmek için   : http://${localIp}:${PORT}`);
     console.log(`=================================================\n`);
 });
+
+let shuttingDown = false;
+async function shutdownServer() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    server.close();
+    try {
+        await pdfOcr.shutdown();
+    } catch (error) {
+        console.error('PDF OCR shutdown error:', error);
+    }
+}
+
+process.once('SIGINT', () => { shutdownServer().catch(error => console.error(error)); });
+process.once('SIGTERM', () => { shutdownServer().catch(error => console.error(error)); });
