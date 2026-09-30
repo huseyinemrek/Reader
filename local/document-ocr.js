@@ -169,10 +169,28 @@ async function run(command, args) {
         child.once('exit', code => code === 0 ? resolve() : reject(new Error(`${command} exited with ${code}.`)));
     });
 }
+function shouldUseCpuTorch() {
+    if (process.argv.includes('--cpu')) return true;
+    if (process.env.OCR_DEVICE === 'cpu') return true;
+    if (process.arch === 'arm64') return true;
+    try {
+        const { execSync } = require('child_process');
+        execSync('nvidia-smi', { stdio: 'ignore' });
+        return false;
+    } catch (_) {
+        return true;
+    }
+}
 
 async function setup() {
     await run('uv', ['venv', '--python', '3.12.14', '--allow-existing', path.join(__dirname, '.venv-ocr')]);
-    await run('uv', ['pip', 'install', '--python', PYTHON, '--index-url', 'https://download.pytorch.org/whl/cu128', '-r', path.join(__dirname, 'document-ocr-cuda-requirements.txt')]);
+    if (shouldUseCpuTorch()) {
+        console.log(`[ocr:setup] CPU PyTorch paketi kuruluyor (Platform: ${process.platform}, Mimari: ${process.arch})...`);
+        await run('uv', ['pip', 'install', '--python', PYTHON, '-r', path.join(__dirname, 'document-ocr-cpu-requirements.txt')]);
+    } else {
+        console.log('[ocr:setup] CUDA 12.8 destekli PyTorch paketi kuruluyor...');
+        await run('uv', ['pip', 'install', '--python', PYTHON, '--index-url', 'https://download.pytorch.org/whl/cu128', '-r', path.join(__dirname, 'document-ocr-cuda-requirements.txt')]);
+    }
     await run('uv', ['pip', 'install', '--python', PYTHON, '-r', path.join(__dirname, 'document-ocr-requirements.txt')]);
     const runtime = createDocumentOcr();
     try {
@@ -184,8 +202,8 @@ async function setup() {
 
 module.exports = createDocumentOcr;
 if (require.main === module) {
-    if (process.argv[2] !== '--setup') {
-        console.error('Usage: node document-ocr.js --setup');
+    if (!process.argv.includes('--setup')) {
+        console.error('Usage: node document-ocr.js --setup [--cpu]');
         process.exitCode = 1;
     } else {
         setup().catch(error => { console.error(error.message); process.exitCode = 1; });

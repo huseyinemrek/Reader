@@ -26,12 +26,14 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
    npm install
    ```
 
-2. PDF OCR kullanacaksanız ortamı ve sabit sürümlü modelleri hazırlayın:
+2. PDF OCR kullanacaksanız ortamı ve modelleri hazırlayın:
    ```bash
    npm run ocr:setup
    ```
-   Python ortamı `local/.venv-ocr/` altına kurulur; CUDA 12.8 destekli PyTorch paketleri kendi çalışma zamanı kitaplıklarını içerir. Ayrı CUDA Toolkit kurulumu gerekmez. İlk kurulum internet ve model indirmeleri için disk alanı gerektirir.
-
+   Sistem GPU ve mimariyi otomatik algılar:
+   - **CUDA Destekli NVIDIA GPU (x64):** Otomatik olarak CUDA 12.8 destekli PyTorch kurulur.
+   - **CPU / ARM64 (örn. Oracle Cloud Ampere A1, Apple Silicon, VPS):** Otomatik olarak standart CPU PyTorch kurulur. Dilerseniz doğrudan `npm run ocr:setup:cpu` komutunu da kullanabilirsiniz.
+   Python ortamı `local/.venv-ocr/` altına kurulur. İlk kurulum modelleri indirmek için internet bağlantısı ve disk alanı gerektirir.
 3. (İsteğe bağlı) `.env.example` dosyasını `.env` olarak kopyalayın. `PORT` ve `OCR_DEVICE` ayarlarını değiştirebilirsiniz.
 
 4. Sunucuyu başlatın:

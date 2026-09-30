@@ -18,6 +18,7 @@
   "scripts": {
     "start": "node server.js",
     "ocr:setup": "node document-ocr.js --setup",
+    "ocr:setup:cpu": "node document-ocr.js --setup --cpu",
     "test": "node --test pdf-layout.test.js pdf-regions.test.js document-blocks.test.js pdf-windows.test.js"
   }
 }
