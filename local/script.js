@@ -1,23 +1,59 @@
-// --- Firebase Auth Entegrasyonu ---
+// --- Firebase Auth Entegrasyonu (Dinamik ve Sıfır Kod Düzenleme) ---
 let auth = null;
 let signInWithEmailAndPassword = null;
 let createUserWithEmailAndPassword = null;
 let signOut = null;
 let onAuthStateChanged = null;
 
-try {
-    const fb = await import('./firebase-config.js');
-    auth = fb.auth;
-    const authModule = await import("https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js");
-    signInWithEmailAndPassword = authModule.signInWithEmailAndPassword;
-    createUserWithEmailAndPassword = authModule.createUserWithEmailAndPassword;
-    signOut = authModule.signOut;
-    onAuthStateChanged = authModule.onAuthStateChanged;
-} catch (e) {
-    console.warn("Firebase Auth modülü yüklenemedi:", e.message);
+async function initFirebaseAuth() {
+    let config = null;
+
+    // 1. Sunucu API'sinden yapılandırmayı sorgula (.env veya ortam değişkenleri)
+    try {
+        const res = await fetch('/api/firebase-config');
+        if (res.ok) {
+            const data = await res.json();
+            if (data && data.configured && data.apiKey) {
+                config = data;
+            }
+        }
+    } catch (_) {}
+
+    // 2. Sunucu API'sinde yoksa, yerel dosya varsa oradan içe aktarmayı dene
+    if (!config) {
+        try {
+            const fb = await import('./firebase-config.js');
+            if (fb && fb.auth) {
+                auth = fb.auth;
+                const authModule = await import("https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js");
+                signInWithEmailAndPassword = authModule.signInWithEmailAndPassword;
+                createUserWithEmailAndPassword = authModule.createUserWithEmailAndPassword;
+                signOut = authModule.signOut;
+                onAuthStateChanged = authModule.onAuthStateChanged;
+                return;
+            }
+        } catch (_) {}
+    }
+
+    // 3. API'den config alındıysa Firebase Web SDK'sını dinamik başlat
+    if (config) {
+        try {
+            const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js");
+            const authModule = await import("https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js");
+            const app = initializeApp(config);
+            auth = authModule.getAuth(app);
+            signInWithEmailAndPassword = authModule.signInWithEmailAndPassword;
+            createUserWithEmailAndPassword = authModule.createUserWithEmailAndPassword;
+            signOut = authModule.signOut;
+            onAuthStateChanged = authModule.onAuthStateChanged;
+        } catch (err) {
+            console.warn("Firebase SDK başlatılamadı:", err.message);
+        }
+    }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await initFirebaseAuth();
     // --- Initial Config & Auth State ---
     let currentUser = null;
 

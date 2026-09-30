@@ -109,8 +109,21 @@ test('createAuthMiddleware bypasses when DISABLE_AUTH=true', async () => {
         await middleware(req, res, () => { nextCalled = true; });
 
         assert.equal(nextCalled, true);
-        assert.equal(req.user.uid, 'default_local_user');
+        assert.equal(req.user.uid, 'local_user');
     } finally {
         delete process.env.DISABLE_AUTH;
     }
+});
+
+test('createAuthMiddleware defaults to local mode when no projectId is configured', async () => {
+    const middleware = createAuthMiddleware({ projectId: null });
+    const req = { headers: {} };
+    const res = {};
+    let nextCalled = false;
+
+    await middleware(req, res, () => { nextCalled = true; });
+
+    assert.equal(nextCalled, true);
+    assert.equal(req.user.uid, 'local_user');
+    assert.equal(req.user.email, 'local@reader.internal');
 });

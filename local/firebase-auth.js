@@ -162,15 +162,15 @@ async function verifyFirebaseIdToken(token, expectedProjectId, options = {}) {
  * Express middleware: İsteklerdeki Bearer veya ?token değerini doğrular
  */
 function createAuthMiddleware(options = {}) {
-    const projectId = options.projectId || resolveProjectId();
-
     return async function requireAuth(req, res, next) {
-        // İsteğe bağlı bypass (sadece test ortamında ve açıkça belirtilmişse)
-        if (process.env.DISABLE_AUTH === 'true') {
-            req.user = { uid: 'default_local_user', email: 'local@reader.internal' };
+        const projectId = options.projectId !== undefined ? options.projectId : resolveProjectId();
+
+        // Eğer Firebase projesi yapılandırılmamışsa veya DISABLE_AUTH açıksa:
+        // Doğrudan yerel tek kullanıcılı modda çalış (Sıfır pürüz / Out-of-the-box yerel okuyucu)
+        if (!projectId || process.env.DISABLE_AUTH === 'true') {
+            req.user = { uid: 'local_user', email: 'local@reader.internal' };
             return next();
         }
-
         let token = null;
 
         // 1. Authorization: Bearer <token> başlığından oku

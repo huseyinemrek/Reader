@@ -310,6 +310,47 @@ app.get('/api/books/:id/pdf/pages/:page', requireAuth, async (req, res) => {
     }
 });
 
+// API: Firebase istemci yapılandırmasını sağla (kaynak kod düzenleme ihtiyacını ortadan kaldırır)
+app.get('/api/firebase-config', (req, res) => {
+    if (process.env.FIREBASE_PROJECT_ID) {
+        const projectId = process.env.FIREBASE_PROJECT_ID.trim();
+        return res.json({
+            configured: true,
+            apiKey: process.env.FIREBASE_API_KEY || "",
+            authDomain: process.env.FIREBASE_AUTH_DOMAIN || `${projectId}.firebaseapp.com`,
+            projectId: projectId,
+            storageBucket: process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`,
+            messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
+            appId: process.env.FIREBASE_APP_ID || ""
+        });
+    }
+
+    const configPath = path.join(__dirname, 'firebase-config.js');
+    if (fs.existsSync(configPath)) {
+        try {
+            const content = fs.readFileSync(configPath, 'utf8');
+            const extract = (key) => {
+                const match = content.match(new RegExp(`${key}\\s*:\\s*["']([^"']+)["']`));
+                return match ? match[1].trim() : "";
+            };
+            const projectId = extract('projectId');
+            if (projectId) {
+                return res.json({
+                    configured: true,
+                    apiKey: extract('apiKey'),
+                    authDomain: extract('authDomain') || `${projectId}.firebaseapp.com`,
+                    projectId: projectId,
+                    storageBucket: extract('storageBucket') || `${projectId}.firebasestorage.app`,
+                    messagingSenderId: extract('messagingSenderId'),
+                    appId: extract('appId')
+                });
+            }
+        } catch (_) {}
+    }
+
+    return res.json({ configured: false });
+});
+
 // API: Kullanıcı bilgilerini doğrula
 app.get('/api/auth/me', requireAuth, (req, res) => {
     res.json({ user: req.user });
