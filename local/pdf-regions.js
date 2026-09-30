@@ -158,7 +158,7 @@ function detectRegions(blocks, { pixels, width, height }) {
     blocks.forEach((block, index) => {
         if (removed.has(index) || CAPTION.test(block.text) || displays.some(display => display.indices.includes(index))) return;
         const labelMatch = block.text.match(EQUATION_LABEL);
-        const hasOperator = /[=∑∫]|argmax/u.test(block.text);
+        const hasOperator = /[=∑∫←→<>]|argmax/u.test(block.text);
         const indentedFormula = !prose(block) && block.bbox.x0 > left + reference * 1.5 && hasOperator;
         const numberedFormula = labelMatch && hasOperator && (!prose(block) ||
             (geometries[index]?.lines.length <= 2 && block.bbox.x0 > left + reference * 1.5));
@@ -169,7 +169,11 @@ function detectRegions(blocks, { pixels, width, height }) {
         blocks.forEach((other, n) => {
             if (n === index || removed.has(n) || CAPTION.test(other.text)) return;
             const overlapY = other.bbox.y0 < bbox.y1 && other.bbox.y1 > bbox.y0;
-            const nearbyLimit = !prose(other) && other.text.trim().length < 6 && other.bbox.y0 - bbox.y1 < reference * 1.8 && other.bbox.y0 >= bbox.y0;
+            const smallIndices = /^(?:[A-Za-z]+\s*=\s*\d+\s*)+$/u.test(other.text) &&
+                geometries[n]?.lines.every(line => line.size < reference * 0.9);
+            const nearbyLimit = !prose(other) && (other.text.trim().length < 6 || smallIndices) &&
+                other.bbox.y0 - bbox.y1 < reference * 1.8 && other.bbox.y0 >= bbox.y0 &&
+                other.bbox.x0 >= bbox.x0 - reference && other.bbox.x1 <= bbox.x1 + reference;
             if (overlapY || nearbyLimit) { indices.push(n); bbox = union(bbox, other.bbox); }
         });
         let label;
