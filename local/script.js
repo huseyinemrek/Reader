@@ -1467,7 +1467,10 @@ document.addEventListener('DOMContentLoaded', () => {
         comparison.className = 'pdf-page-comparison';
         const columns = document.createElement('div');
         columns.className = 'pdf-page-columns';
-        columns.append(image, text);
+        const imageColumn = document.createElement('div');
+        imageColumn.className = 'pdf-page-image-column';
+        imageColumn.appendChild(image);
+        columns.append(imageColumn, text);
         comparison.appendChild(columns);
         section.append(tools, comparison);
         return section.outerHTML;
