@@ -1,5 +1,3 @@
-'use strict';
-
 // Geometry is processing-only: cached/client blocks contain the public contract,
 // while region recognition can still address individual source glyphs.
 const sourceLines = new WeakMap();
@@ -29,7 +27,7 @@ function weight(text) {
     return Math.max(1, (text.match(/[\p{L}\p{N}]/gu) || []).length);
 }
 
-function nativeBlocks(content, viewport) {
+export function nativeBlocks(content, viewport) {
     const lines = [];
     const matrix = viewport.transform;
     const point = (x, y) => ({ x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] });
@@ -153,7 +151,7 @@ function layoutBlocks(lines) {
     });
 }
 
-function blocksText(blocks) {
+export function blocksText(blocks) {
     return blocks.filter(block => block.type === 'text').map(block => block.text).join('\n\n');
 }
 
@@ -176,7 +174,7 @@ function validMath(math, display) {
         (math.label === undefined || typeof math.label === 'string');
 }
 
-function validBlocks(blocks, text) {
+export function validBlocks(blocks, text) {
     return Array.isArray(blocks) && blocks.every(block => {
         if (!block) return false;
         if (block.type === 'image') return validImage(block) && block.text === undefined && block.runs === undefined;
@@ -193,8 +191,6 @@ function validBlocks(blocks, text) {
     }) && blocksText(blocks) === text;
 }
 
-function blockGeometry(block) {
+export function blockGeometry(block) {
     return sourceLines.get(block);
 }
-
-module.exports = { nativeBlocks, blocksText, validBlocks, blockGeometry };

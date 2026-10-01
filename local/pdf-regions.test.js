@@ -6,7 +6,7 @@ const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { nativeBlocks, blocksText, validBlocks } = require('./pdf-layout');
+const { nativeBlocks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 const { detectRegions, processRegions } = require('./pdf-regions');
 
 function row(text, y, x = 25, size = 10) {

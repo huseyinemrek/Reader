@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { blockGeometry } = require('./pdf-layout');
+const { blockGeometry } = require('../hosting/public/pdf-layout-core.mjs');
 
 const CAPTION = /^(?:Figure|Fig\.|Şekil|Sekil)\s*\d+(?:[.\-]\d+)*\s*[:：]/iu;
 const EQUATION_LABEL = /\((\d+(?:\.\d+)*)\)\s*[,.;]?$/u;

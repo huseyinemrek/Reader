@@ -1,6 +1,6 @@
 # VPS okuyucu — Ubuntu 26.04 / Oracle Ampere ARM64
 
-VPS sürümü `../local/server.js` ve aynı istemciyi kullanır: kitap yükleme/silme, kütüphane, EPUB kaynakları, PDF görüntüleme, okuma konumu ve tarayıcı TTS özellikleri ayrı bir uygulamada yeniden yazılmaz. `hosting/` Firebase sürümü ve bağımsız `local/` sürümü değişmeden ayrı kullanım seçenekleridir.
+VPS sürümü `../local/server.js` ve aynı istemciyi kullanır: kitap yükleme/silme, kütüphane, EPUB kaynakları, PDF görüntüleme, okuma konumu ve tarayıcı TTS özellikleri ayrı bir uygulamada yeniden yazılmaz. Bağımsız local aynı makinede OCR çalıştırır; statik Firebase hosting ortak okuyucu modüllerini kullanır ama OCR/ev worker arayüzü içermez.
 
 ## Kurulum
 
@@ -21,7 +21,7 @@ npm --prefix vps start
 | Değişken | Varsayılan / kullanım |
 | --- | --- |
 | `HOST`, `PORT` | Yeni kurulumda `127.0.0.1`, `3000`; doğrudan mevcut genel erişim için `HOST=0.0.0.0` |
-| `DATA_DIR` | `vps/`; bağımsız `uploads/`, `library.json`, `compute-jobs.json` |
+| `DATA_DIR` | `vps/`; bağımsız `uploads/`, `library.json`, `compute-jobs.json`, `layout-cache/` |
 | `READER_ENV_FILE` | `vps/.env`; isteğe bağlı başka env dosyası |
 | `OCR_PYTHON` | Mevcut ortak `local/.venv-ocr` Python yolu |
 | `OCR_REQUEST_TIMEOUT_MS` | `1800000` (30 dakika); gözlenen 13+ dakikalık CPU sayfalarını destekler |
@@ -53,6 +53,15 @@ Taşıma aracı, VPS kütüphanesi henüz yoksa `local/library.json` ve `local/u
 GitHub Actions dağıtımı aynı geçişi yapar, mevcut PM2 `reader` adını korur ve CPU ortamı varsa yeniden kurmaz. Node.js yükseltmesini ayrı bakım adımı olarak yapın; dağıtım mevcut desteklenen Node sürümünü zorla değiştirmez.
 Mevcut doğrudan `0.0.0.0:3000` Reader erişimini korumak için taşıma aracı hedef env dosyasında `HOST` belirtilmemişse `HOST=0.0.0.0` ekler. Var olan açık `HOST` ayarını değiştirmez. Reverse proxy/TLS kurulumu ayrı bir geçiştir; proxy henüz yokken loopback'e geçmek genel okuyucu bağlantısını keser.
 
+## Ortak okuyucu, düzen cache ve yükleme
+
+EPUB/HTMLZ dosyaları VPS diskinde kalır. Yeni yükleme veya eski kitabın ilk açılması, tek arka plan Node worker’ında küçük bir düzen paketi üretir; tarayıcıdan arşivin tamamını tekrar yüklemek gerekmez. Paket metin/CSS ve görsel ölçülerini içerir; resim/font byte’larını içermez. Mevcut ekran, kullanıcı fontu ve kenar boşluklarıyla bütün kitabın sayfa sayısı tarayıcıda ölçülür; sayfa hesabı diğer bölümlerin büyük resimlerini indirmez.
+
+Hazır paket `DATA_DIR/layout-cache/<bookId>/<sourceVersion>/` altında saklanır ve sunucu yeniden başlatıldığında kullanılır. Kaynak dosyası veya üretici değişince eski cache iptal edilir; kitap silme bekleyen üretimi ve ilgili cache’i kaldırır. Dosyaları yeniden yükleme veya kütüphaneyi taşıma adımı gerekmez. Bu kuyruk OCR kuyruğundan ayrıdır; VPS CPU OCR ve bilgisayar modundaki işler korunur.
+
+Üç sürüm aynı PDF yer işareti/tipografi, üç PDF düzeni, döşemeli kaynak viewer ve ayırıcı davranışını kullanır. Kullanıcı font/renk/boyut seçimi EPUB’de de kaynak CSS’ye üstün gelir; italik/kalın/göreli boyutlar korunur. Okuyucunun üst menüsündeki `+` çoklu/tekrarlı dosya seçimini sekmelik kuyruğa ekler. Küçük yüzde dairesi gerçek kitap adını gösterir; kitap/sayfa değiştirmek ve ayar kullanmak yüklemeyi durdurmaz. Sekme kapanınca bekleyen dosyalar geri getirilmez; tamamlanmış kitaplar VPS’de kalır. Bekleyen işte tarayıcı kapatma/yenileme uyarısı verir; çıkış/hesap değişimi eski hesabın işlerini iptal eder.
+
+
 
 ## OCR modları ve kalıcı kuyruk
 
@@ -73,6 +82,7 @@ Korumalı EPUB görsel/SVG/CSS arka plan/font URL’leri de mevcut kullanıcı `
 - `GET /api/runtime-config` → `{mode:'vps',pipelineVersion:15,authEnabled}`.
 - `GET /api/books/:id/pdf` → `{totalPages,sourceVersion,textLayer:'native'|'scanned',ocrMode:'auto'|'on'|'off',automaticOcr}`.
 - `POST /api/books/:id/pdf/ocr` gövde `{mode:'auto'|'on'|'off'}` → güncel kitap tanımı; bekleyen/işlenen nesilleri iptal eder.
+- `GET /api/books/:id/layout` → hazırlanırken 202 `{status:'pending'|'processing',sourceVersion}`, hazırken 200 ZIP + `X-Reader-Source-Version`, hatalı arşivde 422 `{status:'failed',sourceVersion,error}`. Yalnız kitap sahibi başlatabilir/okuyabilir.
 - `GET /api/books/:id/pdf/pages/:page` → kitap tercihine göre sayfa sonucu veya 202 `{status,jobId,mode,error?}`. `?ocr=0` yalnız yerleşik metni; `?ocr=1` açık yeniden üretimi ister. `?ocrJob=<id>` yalnız bu neslin sonucunu izler; iptal edilen/değiştirilen nesil 410 döndürür.
 - `GET /api/books/:id/compute` → `{mode,totalPages,counts:{pending,processing,completed,failed},jobs:[{id,page,status,mode,error?}]}`. Sayımlar kuyruktaki işlere aittir; önceden kuyruğa alınmamış disk cache sayfaları sayılmaz.
 - `POST /api/books/:id/compute` gövde `{mode:'vps'|'compute',fromPage?,toPage?}`; aralık verilmezse PDF'nin tamamı. Kitap OCR tercihini `on` yapar; GET kuyruk durumuyla birlikte güncel PDF tanımı alanlarını döndürür.

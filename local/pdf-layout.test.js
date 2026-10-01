@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { nativeBlocks, blocksText, validBlocks } = require('./pdf-layout');
+const { nativeBlocks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 
 function consistent(blocks) {
     assert.equal(validBlocks(blocks, blocksText(blocks)), true);

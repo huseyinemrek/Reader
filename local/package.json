@@ -20,11 +20,12 @@
     "start": "node server.js",
     "ocr:setup": "node document-ocr.js --setup",
     "ocr:setup:cpu": "node document-ocr.js --setup --cpu",
-    "test": "node --test pdf-layout.test.js pdf-regions.test.js document-blocks.test.js pdf-windows.test.js firebase-auth.test.js ocr-queue.test.js pdf-ocr.test.js",
+    "test": "node --test pdf-layout.test.js pdf-regions.test.js document-blocks.test.js pdf-windows.test.js firebase-auth.test.js ocr-queue.test.js pdf-ocr.test.js layout-queue.test.js ../hosting/tests/*.test.mjs",
     "test:reader": "node --test ../tests/reader.test.cjs",
     "check": "npm test && npm run test:reader"
   },
   "devDependencies": {
+    "firebase-tools": "^15.32.1",
     "puppeteer": "^25.12.0"
   }
 }

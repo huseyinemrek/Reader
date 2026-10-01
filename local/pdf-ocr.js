@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
 const crypto = require('crypto');
-const { nativeBlocks, blocksText, validBlocks } = require('./pdf-layout');
+const { nativeBlocks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
+const { nativeTextContent } = require('../hosting/public/pdf-fonts.mjs');
 const createDocumentOcr = require('./document-ocr');
 const { documentBlocks } = require('./document-blocks');
 const { createSourceWindowRenderer } = require('./pdf-windows');
@@ -17,77 +18,6 @@ const CLASSIFIER_VERSION = 2;
 const PDFJS_PACKAGE_DIR = path.dirname(requireFromHere.resolve('pdfjs-dist/package.json'));
 const STANDARD_FONT_DATA_URL = `${path.join(PDFJS_PACKAGE_DIR, 'standard_fonts').replace(/\\/g, '/')}/`;
 const CMAP_URL = `${path.join(PDFJS_PACKAGE_DIR, 'cmaps').replace(/\\/g, '/')}/`;
-
-function nativeFontStyle(font) {
-    const name = font.name;
-    const css = font.cssFontInfo;
-    let weight;
-    let italic = false;
-    let oblique = false;
-    const data = font.data;
-    // PDF.js retains repaired SFNT tables with fontExtraProperties enabled.
-    // CFF conversion synthesizes OS/2 weight 500, so never use that as source weight.
-    if (data instanceof Uint8Array && data.byteLength >= 12) {
-        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-        const count = view.getUint16(4);
-        if (12 + count * 16 <= data.byteLength) {
-            const cff = view.getUint32(0) === 0x4f54544f;
-            for (let index = 0; index < count; index += 1) {
-                const record = 12 + index * 16;
-                const tag = view.getUint32(record);
-                const offset = view.getUint32(record + 8);
-                const length = view.getUint32(record + 12);
-                if (offset + length > data.byteLength) continue;
-                if (tag === 0x4f532f32 && length >= 64) { // OS/2
-                    const value = view.getUint16(offset + 4);
-                    if (!cff && value >= 1 && value <= 1000) weight = value;
-                    const selection = view.getUint16(offset + 62);
-                    italic ||= !!(selection & 1);
-                    oblique ||= !!(selection & 512);
-                } else if (tag === 0x68656164 && length >= 46) { // head
-                    italic ||= !!(view.getUint16(offset + 44) & 2);
-                } else if (tag === 0x706f7374 && length >= 8) { // post
-                    italic ||= view.getInt32(offset + 4) !== 0;
-                }
-            }
-        }
-    }
-    const cssWeight = Number(css?.fontWeight);
-    if (cssWeight >= 1 && cssWeight <= 1000) weight = cssWeight;
-    if (weight === undefined) {
-        if (font.black || /black|heavy/iu.test(name)) weight = 900;
-        else if (/(?:extra|ultra)[ -]?bold/iu.test(name)) weight = 800;
-        else if (/(?:semi|demi)[ -]?bold/iu.test(name)) weight = 600;
-        else if (font.bold || /bold/iu.test(name) || css?.fontWeight === 'bold') weight = 700;
-        else if (/(?:extra|ultra)[ -]?light/iu.test(name)) weight = 200;
-        else if (/light/iu.test(name)) weight = 300;
-        else if (/thin/iu.test(name)) weight = 100;
-        else if (/medium/iu.test(name)) weight = 500;
-        else weight = 400;
-    }
-    return {
-        sourceFontName: name,
-        fontFamily: font.fallbackName,
-        fontStyle: oblique || /oblique/iu.test(name) || Number(css?.italicAngle) ? 'oblique' :
-            italic || font.italic || /italic/iu.test(name) ? 'italic' : 'normal',
-        fontWeight: weight
-    };
-}
-
-async function nativeTextContent(page) {
-    const content = await page.getTextContent();
-    const names = [...new Set(content.items.filter(item => typeof item.str === 'string' && item.str.trim()).map(item => item.fontName))];
-    if (!names.length) return content;
-    // Loading font objects needs operators, not page.render or the OCR worker.
-    await page.getOperatorList();
-    await Promise.all(names.map(async name => {
-        const font = await new Promise(resolve => page.commonObjs.get(name, resolve));
-        if (font && typeof font.name === 'string' && font.name.trim()) {
-            content.styles[name] = { ...content.styles[name], ...nativeFontStyle(font) };
-        }
-    }));
-    return content;
-}
 
 class PdfOcrError extends Error {
     constructor(statusCode, message) {

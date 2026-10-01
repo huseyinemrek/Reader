@@ -4,7 +4,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const katex = require('katex');
-const { blocksText, validBlocks } = require('./pdf-layout');
+const { blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 
 function escaped(content, index) {
     let slashes = 0;

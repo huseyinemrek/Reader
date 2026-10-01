@@ -149,6 +149,11 @@ body {
 /* Theme Overrides */
 #book-content[data-theme-override="true"] {
     background-color: var(--container-bg) !important;
+    color: var(--text-color) !important;
+}
+
+#book-content[data-theme-override="true"] * {
+    color: var(--text-color) !important;
 }
 
 
@@ -277,35 +282,6 @@ body {
 
 #reader-view.paged-mode #book-content p {
     break-inside: avoid-page;
-}
-
-/* PDF Paged Mode */
-#reader-view.paged-mode #book-viewport.pdf-paged-viewport {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow-y: auto;
-}
-
-#reader-view.paged-mode #book-viewport.pdf-paged-viewport #book-content {
-    height: auto !important;
-    width: auto !important;
-    column-width: auto !important;
-    column-gap: normal !important;
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: center !important;
-    justify-content: center !important;
-    padding: 20px !important;
-}
-
-#reader-view.paged-mode .pdf-page {
-    display: none !important;
-}
-
-#reader-view.paged-mode .pdf-page.active-pdf-page {
-    display: block !important;
-    margin: 0 auto;
 }
 
 /* Navigation Buttons for Paged Mode */
@@ -998,7 +974,7 @@ img.book-cover {
     border-radius: 30px;
     width: 90%;
     max-width: 1200px;
-    z-index: 80;
+    z-index: 96;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;

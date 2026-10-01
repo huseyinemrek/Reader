@@ -13,6 +13,7 @@ const { createCanvas } = require('@napi-rs/canvas');
 process.env.OCR_PYTHON = path.join(os.tmpdir(), `reader-policy-no-python-${require('crypto').randomUUID()}`);
 const createPdfOcr = require('./pdf-ocr');
 const createOcrQueue = require('./ocr-queue');
+const { nativeFontStyle } = require('../hosting/public/pdf-fonts.mjs');
 
 function textStream(text, y = 170) {
     return `BT /F1 5 Tf 12 ${y} Td (${text.replace(/[\\()]/g, '\\$&')}) Tj ET`;
@@ -123,15 +124,15 @@ test('native extraction preserves source face names and regular, italic, oblique
     const page = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
     assert.equal(page.source, 'native');
     assert.equal(page.text, words.join(' '));
-    assert.deepEqual(page.blocks[0].runs.map(run => ({
-        text: run.text.trim(), fontName: run.fontName, fontFamily: run.fontFamily, fontStyle: run.fontStyle, fontWeight: run.fontWeight
-    })), [
-        { text: 'Regular', fontName: 'Helvetica', fontFamily: 'sans-serif', fontStyle: 'normal', fontWeight: 400 },
-        { text: 'Italic', fontName: 'Times-Italic', fontFamily: 'serif', fontStyle: 'italic', fontWeight: 400 },
-        { text: 'Oblique', fontName: 'Helvetica-Oblique', fontFamily: 'sans-serif', fontStyle: 'oblique', fontWeight: 400 },
-        { text: 'Bold', fontName: 'Helvetica-Bold', fontFamily: 'sans-serif', fontStyle: 'normal', fontWeight: 700 },
-        { text: 'Mono', fontName: 'Courier', fontFamily: 'monospace', fontStyle: 'normal', fontWeight: 400 }
-    ]);
+    const runs = page.blocks[0].runs;
+    assert.deepEqual(runs.map(run => run.text.trim()), words);
+    assert.deepEqual(runs.map(run => run.fontName), faces);
+    assert.deepEqual(runs.map(run => run.fontStyle), ['normal', 'italic', 'oblique', 'normal', 'normal']);
+    assert.ok(runs[3].fontWeight >= 600 && runs[0].fontWeight < 600);
+    assert.match(runs[0].fontFamily, /sans-serif/u);
+    assert.match(runs[1].fontFamily, /serif/u);
+    assert.match(runs[4].fontFamily, /monospace/u);
+    assert.notEqual(runs[0].fontFamily, runs[1].fontFamily);
     assert.equal(page.imageUrl, undefined);
     const fresh = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
     assert.deepEqual(fresh.blocks, page.blocks);
@@ -153,6 +154,46 @@ test('embedded native typography comes from font tables even when source names h
         ['ABCDEF+SourceA', 'normal', 400], ['GHIJKL+SourceB', 'italic', 400], ['MNOPQR+SourceC', 'normal', 700]
     ]);
     assert.equal(page.imageUrl, undefined);
+});
+
+test('native font tables take precedence over misleading face labels and retain real families', () => {
+    const directory = path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'standard_fonts');
+    const regular = nativeFontStyle({
+        name: 'Source-BoldItalic', data: new Uint8Array(fs.readFileSync(path.join(directory, 'LiberationSans-Regular.ttf')))
+    });
+    assert.equal(regular.fontWeight, 400);
+    assert.equal(regular.fontStyle, 'normal');
+    assert.match(regular.fontFamily, /Liberation Sans/u);
+    const oblique = nativeFontStyle({
+        name: 'Source-Oblique', data: new Uint8Array(fs.readFileSync(path.join(directory, 'LiberationSans-Italic.ttf')))
+    });
+    assert.equal(oblique.fontStyle, 'oblique');
+});
+
+test('unknown source metadata and synthesized CFF tables do not invent normal weight or emphasis', () => {
+    for (const name of ['ABCDEF+UnspecifiedFace', 'Bookkeeper', 'Blackadder', 'LightHouse']) {
+        const unknown = nativeFontStyle({ name, fallbackName: 'serif', cssFontInfo: { italicAngle: null } });
+        assert.equal(Object.hasOwn(unknown, 'fontWeight'), false);
+        assert.equal(Object.hasOwn(unknown, 'fontStyle'), false);
+    }
+    const data = new Uint8Array(92);
+    const view = new DataView(data.buffer);
+    view.setUint32(0, 0x4f54544f);
+    view.setUint16(4, 1);
+    view.setUint32(12, 0x4f532f32);
+    view.setUint32(20, 28);
+    view.setUint32(24, 64);
+    view.setUint16(32, 500);
+    const converted = nativeFontStyle({ name: 'UnspecifiedFace', data });
+    assert.equal(Object.hasOwn(converted, 'fontWeight'), false);
+    assert.equal(Object.hasOwn(converted, 'fontStyle'), false);
+    // The same table in a TrueType font is real weight/style metadata.
+    view.setUint32(0, 0x00010000);
+    const source = nativeFontStyle({ name: 'UnspecifiedFace', data });
+    assert.equal(source.fontWeight, 500);
+    assert.equal(source.fontStyle, 'normal');
+    view.setUint16(90, 512);
+    assert.equal(nativeFontStyle({ name: 'UnspecifiedFace', data }).fontStyle, 'oblique');
 });
 
 test('native extraction ignores OCR cache and OCR-enabled reads reuse only recognized output', async t => {

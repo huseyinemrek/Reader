@@ -11,6 +11,8 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
 - **EPUB, PDF, HTML Desteği:** Kitap içi arama, sayfa atlama (G kısayolu), metin boyutu, yazı tipi ve tema özelleştirmeleri.
 - **Edge Sesli Okuma (TTS):** Cümle düzeyinde vurgulama ve hız ayarı.
 - **Yerel PDF OCR:** GLM-OCR ile bölge bazında metin ve LaTeX tanıma; PP-DocLayoutV3 ile başlık, paragraf, algoritma, formül ve görsel yapısının çıkarılması.
+- **Sunucu düzen paketi:** EPUB/HTMLZ bölüm metni, CSS ve görsel ölçüleri arka plan worker’ında hazırlanıp diskte saklanır; sayfa hesabı tarayıcıda mevcut ekran/font ayarlarına göre yapılır.
+- **Okurken kitap ekleme:** Üst okuyucu menüsündeki `+`, çoklu seçim ve art arda ekleme; kitap adı tooltip’i olan küçük yüzde dairesi, sekme kapanırken bekleyen iş uyarısı.
 
 ## Gereksinimler
 
@@ -58,7 +60,19 @@ Mevcut `local/` kitapları ve önbellekleri yerinde kalır; VPS’ye taşıma k�
 
 ## EPUB görselleri ve kitap kaynakları
 
-EPUB içindeki görsel, SVG bağlantısı, CSS arka planı ve font yolu kendi bölüm/stylesheet konumuna göre çözülür. Firebase oturumu kullanılıyorsa korumalı aynı-origin EPUB kaynaklarına güncel kullanıcı token’ı eklenir; bu davranış hem yerel hem VPS modunda geçerlidir. Dış originlere token veya Authorization başlığı gönderilmez. SVG’nin `#fragment` bağlantıları korunur; stylesheet önbelleği token içermeyen kaynak CSS’yi saklar.
+EPUB içindeki görsel, SVG bağlantısı, CSS arka planı ve font yolu kendi bölüm/stylesheet konumuna göre çözülür. Firebase oturumu kullanılıyorsa korumalı aynı-origin kaynaklara güncel kullanıcı token’ı eklenir; bu davranış hem yerel hem VPS modunda geçerlidir. Dış originlere kimlik bilgisi gönderilmez. Okuyucu içindeki kaynak CSS görselleri korunur; sayfa ölçümünün görünmez iframe’inde dekoratif görseller indirilmez.
+
+### Düzen paketi ve sayfa hesabı
+
+Yeni EPUB/HTMLZ yüklemesi arka plan üretimini başlatır; eski diskteki kitap için ilk açılış başlatır. Tek Node worker’ı bölüm metinlerini, CSS’yi ve görsel boyutlarını işler; HTTP olay döngüsü paketin üretilmesini beklemez. Paket görsel/font dosyalarının asıl byte’larını içermez. Tarayıcı bütün bölüm metinlerini mevcut düzenle ölçer; yalnız okunan alandaki EPUB görsellerini yükler. Sayfa sayısı basılı kitap numarası değildir; ekran veya font ölçüleri değişince yeniden hesaplanır.
+
+Kimlik doğrulamalı `GET /api/books/:id/layout`, hazırlanırken `202 {status:'pending'|'processing',sourceVersion}`, hazırken `200` ZIP ve `X-Reader-Source-Version`, üretim başarısızsa `422 {status:'failed',sourceVersion,error}` döndürür. Dosya/üretici sürümü değişmedikçe başarısız arşiv kendiliğinden tekrar işlenmez. Hazır paket `DATA_DIR/layout-cache/<bookId>/<sourceVersion>/` altında yeniden başlatmada kullanılır; kaynak değişikliği ve kitap silme ilgili cache’i iptal eder. Bu dizin kişisel veridir ve Git’e dahil edilmez.
+
+### Sekmelik yükleme kuyruğu
+
+Okuyucunun üst menüsünü açıp `+` ile kitap seçin. Seçili dosyalar sırayla yüklenir; yeni seçim mevcut kuyruğa eklenir. Hazırlama/sonlandırma aşaması belirsiz, aktarım aşaması gerçek byte yüzdesidir; `%100` ancak kitap kaydı tamamlanınca gösterilir. Sayfa çevirebilir, başka kitaba geçebilir ve ayar değiştirebilirsiniz; tamamlanma yalnız kütüphaneyi yeniler, okuyucuyu sıfırlamaz.
+
+Hatalı iş sonraki kitabı durdurmaz; daire üzerinden yeniden deneme/listeden kaldırma kullanılabilir. Bekleyen veya çalışan iş varsa sekme kapatma/yenilemede tarayıcı uyarısı açılır; uyarı geçilip sekme kapanırsa kuyruk geri getirilmez. Tamamlanmış kitaplar diskte kalır. Oturum değiştirme/çıkış eski hesabın bekleyen işlerini iptal eder. Local aynı makinedeki OCR motorunu kullanır; VPS/ev worker hazırlama paneli local arayüzünde gösterilmez.
 
 ## PDF ve OCR
 
@@ -97,7 +111,7 @@ Metin, satır içi matematik, numaralı denklemler ve algoritma satırları ayr�
 - `GET /api/books/:id/pdf/pages/:page` seçilebilir `blocks`, kaynak (`native`/`ocr`), `engine`, `device`, `modelRevision`, `elapsedMs`, `pipelineVersion`, `metrics`, `qualityLimits` döndürür. OCR sonuçları kaynak görsel adresini de içerir; yerleşik metin okuması görsel üretmez. `?ocr=0` yalnız yerleşik metni, `?ocr=1` açık yeniden çıkarımı ister. VPS’de dönen `jobId` için `?ocrJob=<id>` aynı nesli izler; iptal edilen/değiştirilen iş 410 döndürür. GLM için `confidence` değeri `null`dır; uydurma doğruluk yüzdesi verilmez.
 - OCR kusursuz değildir: geçerli LaTeX doğru denklem garantisi vermez. Küçük semboller, grafik etiketleri ve karmaşık düzen için orijinal sayfa esas alınmalıdır. GLM'nin model kartı Türkçe için ayrı doğruluk garantisi sunmaz.
 
-Ortak OCR motoru `local/`, `vps/` ve isteğe bağlı `compute/` tarafından kullanılır; Firebase `hosting/` sürümü değişmez.
+Ortak OCR motoru `local/`, `vps/` ve isteğe bağlı `compute/` tarafından kullanılır; Firebase `hosting/` sürümünde yalnız yerleşik PDF metni ve kaynak görüntü vardır, OCR çalışmaz.
 
 ### GPU kullanımı
 
@@ -155,7 +169,19 @@ Depo kökünden ilk kurulum:
 ```sh
 npm --prefix local ci
 npm --prefix local exec -- puppeteer browsers install chrome
+npm --prefix local exec -- firebase setup:emulators:firestore
+npm --prefix local exec -- firebase setup:emulators:storage
 ```
+
+Gerçek hosting vakaları resmi Auth, Firestore, Storage ve Hosting emülatörleriyle çalışır; **Java 21+** gerekir. Java’nın PATH’teki sürümünü değiştirmek istemiyorsanız yalnız bu komut için `READER_TEST_JAVA_HOME` ayarlayın:
+
+```powershell
+$env:READER_TEST_JAVA_HOME = "C:\path\to\jdk-21"
+npm --prefix local run check
+```
+
+Chromium kurulumu, ilk emülatör JAR indirmeleri ve gerçek Firebase Web SDK / font dosyaları için internet erişimi gerekir. Python/GPU/OCR modelleri bu okuyucu regresyonlarının ön koşulu değildir.
+
 
 Her commit öncesi:
 
@@ -163,4 +189,8 @@ Her commit öncesi:
 npm --prefix local run check
 ```
 
-`check`, mevcut Node davranış testlerini ve `tests/reader.test.cjs` gerçek Chromium okuyucu kontrollerini birlikte çalıştırır. Yalnız tarayıcı vakaları için `npm --prefix local run test:reader` kullanın. Her iki giriş noktası ayrı geçici veri dizininde ve yalnız `127.0.0.1` üzerinde açılır; gerçek kütüphane ve üretim doğrulaması değiştirilmez. Font/renk/boyut override’ları, yeniden açmada korunmaları, sözcük düzeyinde vurgu, göreli boyutlar ve doğru içindekiler hedefleri kontrol edilir. Başarısızlık sıfır olmayan çıkış kodu verir. Gözlenen son sonuç: 60 davranış testi ve 8 tarayıcı senaryosu (Node raporunda iki üst testle birlikte 10 test), tamamı geçti. VPS üretim kurulumunda `--omit=dev` korunur; Puppeteer ve Chromium üretim OCR bağımlılığı değildir.
+`check`, ortak Node davranış testlerini, hosting Range/layout/upload testlerini ve `tests/reader.test.cjs` gerçek Chromium okuyucu kontrollerini birlikte çalıştırır. Yalnız okuyucu vakaları için `npm --prefix local run test:reader` kullanın. Local ve VPS ayrı geçici veri dizinlerinde, hosting izole `demo-reader-regression` projesinin resmi emülatörlerinde çalışır; hepsi yalnız `127.0.0.1` kullanır. Üretim kütüphanesi, oturumları ve kuralları değiştirilmez. Storage emülatörü `Content-Range` başlığını CORS ile açmadığından test yönlendirmesi Hosting ve gerçek Storage yanıtlarını tek origin’de aktarır; byte, Range, durum veya yanıt başlığı değiştirmez. Canlı Storage CORS doğrulamasının yerini almaz.
+
+PDF vurgu/göreli boyutları ve kullanıcı override’ları, kaynak yer işaretleri, gerçek kaynak canvas mürekkebi, üç düzen/ayırıcı/zoom, EPUB paketinden resimler indirilmeden sayfa hesabı, görünen resmin gerçek pikseli, yeniden boyutlandırma/font değişimi sonrası konum/ilerleme ve okurken iki gerçek dosya yüklenmesi kontrol edilir. Başarısızlık sıfır olmayan çıkış kodu verir. VPS üretim kurulumunda `--omit=dev` korunur; Puppeteer, Firebase CLI, Chromium ve Java üretim OCR bağımlılığı değildir.
+
+Bu değişikliklerin tam kontrolünde 102 davranış testi ve üç sürümde 24 gerçek okuyucu senaryosu başarılı oldu; Node okuyucu raporu üç üst kapsayıcıyla birlikte 27/27 geçti.

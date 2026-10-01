@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { documentBlocks } = require('./document-blocks');
-const { blocksText, validBlocks } = require('./pdf-layout');
+const { blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 
 const bbox = { x0: 20, y0: 10, x1: 300, y1: 190 };
 const context = { bookId: 'document_fixture', pageNumber: 8, width: 320, height: 200,

@@ -1,14 +1,10 @@
 {
-  "name": "edge-reader-server",
+  "name": "edge-reader-cloud",
   "version": "1.0.0",
-  "description": "Local server for Edge Reader to sync across devices",
-  "main": "server.js",
-  "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^4.22.2",
-    "multer": "^1.4.5-lts.1"
-  },
+  "private": true,
+  "type": "module",
+  "description": "Static Firebase Reader; no Node server or OCR runtime",
   "scripts": {
-    "start": "node server.js"
+    "test": "node --test tests/*.test.mjs"
   }
 }

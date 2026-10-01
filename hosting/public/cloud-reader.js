@@ -32,9 +32,34 @@ function mimeType(path) {
         avif: 'image/avif', svg: 'image/svg+xml', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf' })[extension] || 'application/octet-stream';
 }
 
+const absoluteFontSizes = {
+    'xx-small': 0.5625, 'x-small': 0.625, small: 0.8125, medium: 1,
+    large: 1.125, 'x-large': 1.5, 'xx-large': 2, 'xxx-large': 3
+};
+
+function normalizeFontSize(value) {
+    const keyword = value.trim().toLowerCase();
+    if (Object.hasOwn(absoluteFontSizes, keyword)) {
+        return `calc(var(--font-size) * ${absoluteFontSizes[keyword]})`;
+    }
+    return value.replace(/([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*(px|pt|rem)(?![\w-])/gi, (match, amount, unit) => {
+        const scale = unit.toLowerCase() === 'pt' ? 1 / 12 : unit.toLowerCase() === 'rem' ? 1 : 1 / 16;
+        const ratio = Number(amount) * scale;
+        return Number.isFinite(ratio) ? `calc(var(--font-size) * ${Number(ratio.toFixed(6))})` : match;
+    });
+}
+
+export function normalizeInlineStyle(style) {
+    const size = style.getPropertyValue('font-size');
+    if (size) style.setProperty('font-size', normalizeFontSize(size), style.getPropertyPriority('font-size'));
+    if (style.getPropertyValue('text-align').trim().toLowerCase() === 'justify') {
+        style.setProperty('text-align', 'start', style.getPropertyPriority('text-align'));
+    }
+}
+
 // Only the compressed layout index is fetched on open. The original ZIP is opened
 // lazily on the first visible image/font request and is always read using Range.
-export async function createBookResources(book, { uid, signal }) {
+export async function createBookResources(book, { uid, signal, source = null }) {
     let index = { texts: Object.create(null), images: Object.create(null) };
     if (book.layoutUrl) {
         const response = await fetch(book.layoutUrl, { signal, cache: 'force-cache' });
@@ -42,6 +67,10 @@ export async function createBookResources(book, { uid, signal }) {
         index = await readLayoutBundle(await response.arrayBuffer());
         signal.throwIfAborted();
     }
+    const layoutReady = source
+        ? source.layout.then(value => { signal.throwIfAborted(); index = value; })
+        : Promise.resolve();
+    layoutReady.catch(() => {});
     let archivePromise;
     let disposed = false;
     const blobs = new Map();
@@ -55,6 +84,7 @@ export async function createBookResources(book, { uid, signal }) {
     };
     async function assetUrl(path) {
         signal.throwIfAborted();
+        if (source) return source.assetUrl(path);
         if (blobs.has(path)) return blobs.get(path);
         if (pendingBlobs.has(path)) return pendingBlobs.get(path);
         const task = (async () => {
@@ -79,15 +109,19 @@ export async function createBookResources(book, { uid, signal }) {
             if (matched) value = index.texts[matched];
         }
         if (value === undefined) {
-            const zip = await archive();
-            value = await zip.read(await actualPath(path), 'string', requestSignal);
+            value = source ? await source.text(path, requestSignal)
+                : await (await archive()).read(await actualPath(path), 'string', requestSignal);
             index.texts[path] = value;
         }
         requestSignal.throwIfAborted();
         return value;
     }
     async function dimensions(path) {
+        if (source) await layoutReady;
         if (index.images[path]) return index.images[path];
+        const matched = Object.keys(index.images).find(name => name.toLowerCase() === path.toLowerCase());
+        if (matched) return index.images[matched];
+        if (source) throw new Error('Görsel ölçüleri düzen paketinde bulunamadı: ' + path);
         // Old uploads have no geometry index. Determine it once from the cached
         // individual entry; new uploads never fetch image bytes for pagination.
         const zip = await archive();
@@ -97,35 +131,21 @@ export async function createBookResources(book, { uid, signal }) {
         index.images[path] = size;
         return size;
     }
-    async function cssUrls(css, base) {
-        // Images used as decoration must not initiate background downloads.
+    async function cssUrls(css, base, decorations = false) {
+        // Measurement never downloads decorations. Server-backed readers can
+        // let the browser fetch matching CSS images from authenticated URLs.
         const matches = [...css.matchAll(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi)];
         for (const match of matches) {
             const raw = match[2];
             if (raw.startsWith('data:') || raw.startsWith('#')) continue;
             const path = pathOf(new URL(raw, base).href);
-            const url = path && /\.(woff2?|ttf|otf)$/i.test(path) ? await assetUrl(path) : placeholder({width: 1, height: 1});
+            const url = path && (/\.(woff2?|ttf|otf)$/i.test(path) || (source && decorations))
+                ? await assetUrl(path) : placeholder({width: 1, height: 1});
             css = css.replaceAll(match[0], `url("${url}")`);
         }
         return css;
     }
 
-    const absoluteFontSizes = {
-        'xx-small': 0.5625, 'x-small': 0.625, small: 0.8125, medium: 1,
-        large: 1.125, 'x-large': 1.5, 'xx-large': 2, 'xxx-large': 3
-    };
-
-    function normalizeFontSize(value) {
-        const keyword = value.trim().toLowerCase();
-        if (Object.hasOwn(absoluteFontSizes, keyword)) {
-            return `calc(var(--font-size) * ${absoluteFontSizes[keyword]})`;
-        }
-        return value.replace(/([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*(px|pt|rem)(?![\w-])/gi, (match, amount, unit) => {
-            const scale = unit.toLowerCase() === 'pt' ? 1 / 12 : unit.toLowerCase() === 'rem' ? 1 : 1 / 16;
-            const ratio = Number(amount) * scale;
-            return Number.isFinite(ratio) ? `calc(var(--font-size) * ${Number(ratio.toFixed(6))})` : match;
-        });
-    }
 
     function normalizedCss(css) {
         const sheet = new CSSStyleSheet();
@@ -136,7 +156,6 @@ export async function createBookResources(book, { uid, signal }) {
                 if (rule.type === CSSRule.PAGE_RULE) continue;
                 const style = rule.style;
                 if (style) {
-                    for (const property of ['color', 'background-color', 'background']) style.removeProperty(property);
                     const size = style.getPropertyValue('font-size');
                     if (size) style.setProperty('font-size', normalizeFontSize(size), style.getPropertyPriority('font-size'));
                     if (style.getPropertyValue('text-align').trim().toLowerCase() === 'justify') {
@@ -154,15 +173,8 @@ export async function createBookResources(book, { uid, signal }) {
         return serialize(sheet.cssRules);
     }
 
-    function normalizeInlineStyle(style) {
-        const size = style.getPropertyValue('font-size');
-        if (size) style.setProperty('font-size', normalizeFontSize(size), style.getPropertyPriority('font-size'));
-        if (style.getPropertyValue('text-align').trim().toLowerCase() === 'justify') {
-            style.setProperty('text-align', 'start', style.getPropertyPriority('text-align'));
-        }
-    }
 
-    async function cssText(css, base, seen = new Set()) {
+    async function cssText(css, base, seen = new Set(), decorations = false) {
         if (seen.has(base)) return '';
         seen = new Set([...seen, base]);
         // Resolve CSS imports ourselves, so the browser cannot fetch entire
@@ -170,24 +182,25 @@ export async function createBookResources(book, { uid, signal }) {
         const imports = [...css.matchAll(/@import\s+(?:url\(\s*)?['"]([^'"]+)['"]\s*\)?[^;]*;/gi)];
         for (const match of imports) {
             const url = new URL(match[1], base).href;
-            const imported = pathOf(url) === null ? '' : await cssText(await text(url), url, seen);
+            const imported = pathOf(url) === null ? '' : await cssText(await text(url), url, seen, decorations);
             css = css.replace(match[0], imported);
         }
         css = css.replace(/@import[^;]*;/gi, '').replace(/@namespace[^;]+;/gi, '');
-        return cssUrls(normalizedCss(css), base);
+        return cssUrls(normalizedCss(css), base, decorations);
     }
     async function section(html, base, targetDocument, chapterIndex = 0, id = '') {
         const parsed = new DOMParser().parseFromString(html, 'text/html');
+        const decorations = !!source && targetDocument === globalThis.document;
         let css = '';
         for (const style of parsed.querySelectorAll('style')) {
-            css += await cssText(style.textContent, base);
+            css += await cssText(style.textContent, base, new Set(), decorations);
             style.remove();
         }
         for (const link of parsed.querySelectorAll('link[rel="stylesheet"]')) {
             const href = link.getAttribute('href');
             if (href && pathOf(new URL(href, base).href) !== null) {
                 const url = new URL(href, base).href;
-                css += await cssText(await text(url), url);
+                css += await cssText(await text(url), url, new Set(), decorations);
             }
         }
         parsed.querySelectorAll('script,iframe,object,embed,base,link,form,audio,video,source,foreignObject,animate,set').forEach(el => el.remove());
@@ -198,9 +211,8 @@ export async function createBookResources(book, { uid, signal }) {
             element.removeAttribute('srcset');
             element.removeAttribute('ping');
             if (element.hasAttribute('style')) {
-                element.style.color = element.style.backgroundColor = element.style.background = '';
                 normalizeInlineStyle(element.style);
-                element.setAttribute('style', await cssUrls(element.style.cssText, base));
+                element.setAttribute('style', await cssUrls(element.style.cssText, base, decorations));
             }
             const isImage = ['img', 'image'].includes(element.localName);
             if (isImage) {
@@ -248,8 +260,12 @@ export async function createBookResources(book, { uid, signal }) {
         return result;
     }
     return {
-        text, section, assetUrl,
-        async names() { return Object.keys(index.texts).length ? Object.keys(index.texts) : (await archive()).names(); },
+        text, section, assetUrl, layoutReady,
+        get sourceVersion() { return index.sourceVersion; },
+        async names() {
+            if (source) await layoutReady;
+            return Object.keys(index.texts).length ? Object.keys(index.texts) : (await archive()).names();
+        },
         dispose() {
             disposed = true;
             archivePromise?.then(zip => zip.close()).catch(() => {});
@@ -291,9 +307,37 @@ export async function openRangePdf(url, { signal, onError = console.warn } = {})
         });
     };
     transport.abort = () => {};
-    task = pdfjsLib.getDocument({ range: transport, length: first.length, disableStream: true, disableAutoFetch: true, rangeChunkSize: 65536 });
+    task = pdfjsLib.getDocument({
+        range: transport, length: first.length, disableStream: true, disableAutoFetch: true,
+        rangeChunkSize: 65536, fontExtraProperties: true,
+        cMapUrl: '/libs/cmaps/', cMapPacked: true,
+        standardFontDataUrl: '/libs/standard_fonts/', wasmUrl: '/libs/wasm/'
+    });
     const abort = () => { void task.destroy(); };
     signal.addEventListener('abort', abort, { once: true });
     try { return await task.promise; }
     catch (error) { signal.removeEventListener('abort', abort); throw error; }
+}
+
+export function hydrateVisibleAssets(resources, root, bounds, onError = console.warn) {
+    for (const element of root.querySelectorAll('[data-reader-asset]')) {
+        if (element.dataset.assetLoading || element.dataset.assetLoaded || element.dataset.assetFailed) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.bottom <= bounds.top || rect.top >= bounds.bottom || rect.right <= bounds.left || rect.left >= bounds.right) continue;
+        element.dataset.assetLoading = 'true';
+        resources.assetUrl(element.dataset.readerAsset).then(url => {
+            if (!element.isConnected) return;
+            if (element.localName === 'img') element.src = url;
+            else {
+                element.setAttribute('href', url);
+                element.setAttributeNS('http://www.w3.org/1999/xlink', 'href', url);
+            }
+            element.dataset.assetLoaded = 'true';
+        }).catch(error => {
+            if (!element.isConnected || error.name === 'AbortError') return;
+            element.dataset.assetFailed = 'true';
+            element.setAttribute('aria-label', 'Görsel yüklenemedi');
+            onError(error);
+        }).finally(() => { delete element.dataset.assetLoading; });
+    }
 }

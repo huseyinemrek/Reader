@@ -6,7 +6,7 @@ Proje dört çalışma bileşenine ayrılır:
 1. **`local/` — Bağımsız Yerel Sürüm:** Aynı bilgisayarda Node.js sunucu ve yerel CPU/CUDA OCR; ev/LAN kullanımı.
 2. **`vps/` — Sürekli Çalışan Tam Sunucu:** Aynı okuyucu ve kütüphane özellikleri, kendi CPU OCR motoru, kalıcı arka plan kuyruğu ve isteğe bağlı ev worker’ına iş devretme.
 3. **`compute/` — İsteğe Bağlı GPU Worker:** Ev bilgisayarından VPS’ye yalnız outbound HTTPS; bilgisayar moduna atanmış kitapları işler, sonuçları VPS diskine teslim eder ve kuyruk boşalınca kapanır.
-4. **`hosting/` — Firebase Cloud Sürümü:** Mevcut Auth, Firestore ve Cloud Storage tabanlı statik/serverless sürüm; değişmeden korunur.
+4. **`hosting/` — Firebase Cloud Sürümü:** Auth, Firestore ve Cloud Storage tabanlı statik/serverless sürüm; ortak okuyucu özelliklerini kullanır, OCR çalıştırmaz.
 
 ---
 
@@ -18,11 +18,25 @@ Proje dört çalışma bileşenine ayrılır:
 - 🎧 **Sesli Okuma (TTS & Read Aloud):** Cümle düzeyinde görsel vurgulama, hız ayarı (0.75x - 4.0x), Türkçe ve çoklu dil ses seçimi.
 - 🎨 **Kişiselleştirilebilir Temalar:** Orijinal Kitap Teması, Koyu Mod, Açık Mod, Sepya, OLED Siyah ve özel renk seçiciler.
 - 🔤 **Gelişmiş Tipografi:** Yazı tipi ailesi (Inter, Outfit, Lora, Sistem varsayılanı), boyut, satır yüksekliği, sayfa kenar boşlukları ve paragraf aralığı ayarları.
-- 📑 **İçindekiler (TOC):** Bölümler arasında tek tıkla gezinme.
-- 📑 **PDF & EPUB Hibrit Desteği:** EPUB arşivlerini doğrudan istemcide açabilme ve PDF dosyalarını optimize edilmiş parça yükleme ile okuma.
+- 📑 **İçindekiler (TOC):** EPUB bölümleri ve PDF’nin iç içe/adlandırılmış yer işaretleri arasında doğru hedefe gezinme.
+- 📑 **PDF & EPUB Desteği:** Local/VPS’de sunucunun arka planda hazırladığı, hosting’de yükleme sırasında tarayıcının ürettiği düzen paketi; ekran ve font ayarlarına göre tarayıcıda sayfa hesabı. Büyük EPUB görselleri sayfa hesabı için indirilmez.
 - 🔍 **Vektörel PDF Görüntüleyici:** PDF.js ile dinamik döşemeli (tiled canvas) vektör çizim mimarisi. Sayfayı %500'e kadar büyütürken bulanıklaşma ve pikselleşme olmadan orijinal netliği koruma; OCR beklemeden anında kaynak çizimi.
 - **Belge OCR & Formül Tanıma (`local/`, `vps/`, `compute/`):** Ortak GLM-OCR / PP-DocLayoutV3 hattı ve kaynak PDF pencereleri; paragraflar doğal olarak yeniden akar, kod/algoritma satırları korunur. VPS’nin CPU OCR yeteneği korunur; kullanıcı bilgisayar modunu seçerek tüm PDF’yi veya sayfa aralığını evdeki CUDA BF16 worker’a hazırlatabilir.
-- **PDF Düzeni ve OCR Kontrolü (`local/`, `vps/`):** Ayarlardan yalnız metin veya iki yönlü PDF/metin düzeni; sürüklenebilir, genişliği saklanan ayırıcı. OCR kapaktan değil kitap düzeyindeki metin katmanına göre seçilir; kitap için otomatik/açık/kapalı ve kapalıyken bile açık sayfa OCR isteği desteklenir.
+- **PDF Düzeni (üç sürüm):** Yalnız metin veya iki yönlü PDF/metin düzeni; sürüklenebilir ve klavyeyle ayarlanabilir ayırıcı, yakınlaştırılabilir kaynak PDF. Yerleşik metnin italik/kalın/göreli boyutları kullanıcı font/renk/boyut seçimiyle korunur.
+- **OCR Kontrolü (`local/`, `vps/`):** Kitap düzeyindeki metin katmanına göre otomatik/açık/kapalı seçim; kapalıyken de açık sayfa OCR isteği.
+- **Okurken Arka Plan Yükleme (üç sürüm):** Üst okuyucu menüsündeki `+` ile birden fazla veya art arda kitap ekleme. Küçük yüzde dairesinin tooltip’i gerçek kitap adını gösterir; yükleme sayfa/kitap değişimini engellemez. Kuyruk yalnız açık sekmenin belleğinde yaşar; bekleyen iş varsa kapatma/yenileme uyarısı verilir.
+
+
+## Sürüm sınırları
+
+| Özellik | Local | VPS | Hosting |
+| --- | --- | --- | --- |
+| Kitap ve ilerleme | Yerel disk | VPS diski | Storage / Firestore |
+| EPUB / HTMLZ düzen paketi | Sunucu worker’ı, kalıcı cache | Sunucu worker’ı, kalıcı cache | Tarayıcı, Storage |
+| Ekrana göre sayfa / ilerleme | Tarayıcı | Tarayıcı | Tarayıcı |
+| PDF fontları, yer işaretleri, üç düzen | Var | Var | Var |
+| Okurken sekmelik yükleme kuyruğu | Var | Var | Var |
+| OCR | Aynı makine CPU/CUDA | Kendi CPU / isteğe bağlı outbound ev worker | Yok |
 
 ---
 
@@ -40,8 +54,9 @@ reader/
 │   ├── document-ocr.js         # Kalıcı Python model süreci ve işlem kuyruğu
 │   ├── document-ocr-worker.py  # Yapı analizi, parça bazında metin/LaTeX tanıma
 │   ├── document-blocks.js      # Kaynak konumlu satır içi matematik ve seçilebilir çıktı
-│   ├── pdf-viewer.js           # Dinamik döşemeli vektörel PDF görüntüleyici (PDF.js)
-│   ├── pdf-layout.js           # Yerel PDF paragraf sınırları ve font ölçüleri
+│   ├── layout-source.js        # Disk arşivi kimliği ve güvenli kaynak yolu
+│   ├── layout-queue.js         # Tek worker, kalıcı düzen paketi cache ve iptal
+│   ├── layout-worker.js        # Ortak EPUB/HTMLZ düzen paketi üretimi
 │   ├── index.html              # Okuyucu arayüzü
 │   ├── script.js               # İstemci mantığı (yerel API entegreli)
 │   ├── style.css               # Tema ve okuyucu stilleri
@@ -73,9 +88,19 @@ reader/
 │   │   ├── cloud-reader.js     # Range tabanlı EPUB ve PDF açıcı
 │   │   ├── layout-bundle.js    # Hızlı sayfa hesabı için düzen paketi
 │   │   ├── range-archive.js    # HTTP Range ile ZIP okuma motoru
+│   │   ├── server-reader.js    # Local/VPS düzen API’si için kaynak adaptörü
+│   │   ├── pdf-reader.js       # Ortak yerleşik PDF tipografisi
+│   │   ├── pdf-outline.js      # Ortak yer işareti hedefleri ve içindekiler
+│   │   ├── pdf-layout-view.js  # Ortak PDF düzeni, ayırıcı ve viewer yaşam döngüsü
+│   │   ├── pdf-viewer.js       # Ortak döşemeli kaynak PDF çizimi
+│   │   ├── upload-queue.js     # Ortak sekmelik yükleme kuyruğu
 │   │   ├── firebase-config.example.js # Firebase SDK konfigürasyon şablonu
 │   │   └── style.css           # Stillendirme
 │   └── README.md               # Firebase dağıtım kılavuzu
+│
+├── tests/                      # Küçük özgün PDF’ler, üretilen EPUB ve gerçek Chromium senaryoları
+│   ├── reader.test.cjs         # Local / VPS / resmi Firebase emülatörleri
+│   └── helpers/                # İzole gerçek sunucu ve kitap hazırlama
 │
 ├── .gitignore                  # Hassas anahtar ve kişisel verileri dışlayan kural seti
 ├── LICENSE                     # MIT Lisansı

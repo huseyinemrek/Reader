@@ -8,6 +8,7 @@ const yauzl = require('yauzl');
 const createPdfOcr = require('./pdf-ocr');
 const crypto = require('crypto');
 const createOcrQueue = require('./ocr-queue');
+const createLayoutQueue = require('./layout-queue');
 const { createAuthMiddleware, resolveProjectId } = require('./firebase-auth');
 
 const MODE = process.env.READER_MODE === 'vps' ? 'vps' : 'local';
@@ -47,12 +48,14 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || process.env.READER_DEFAULT
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const COVERS_DIR = path.join(UPLOADS_DIR, 'covers');
 const DB_FILE = path.join(DATA_DIR, 'library.json');
+const LAYOUT_CACHE_DIR = path.join(DATA_DIR, 'layout-cache');
 
 // Klasörleri oluştur
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
 
 const pdfOcr = createPdfOcr(UPLOADS_DIR);
+const layoutQueue = createLayoutQueue(LAYOUT_CACHE_DIR, { uploadsDir: UPLOADS_DIR });
 
 // Veritabanını yükle
 let library = [];
@@ -193,7 +196,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
 // Only public browser assets are exposed; backend source, data and secrets are never static.
-for (const filename of ['index.html', 'script.js', 'style.css', 'pdf-viewer.js', 'firebase-config.js']) {
+for (const filename of ['index.html', 'script.js', 'style.css', 'firebase-config.js']) {
     app.get(filename === 'index.html' ? ['/', '/index.html'] : `/${filename}`, (req, res) => res.sendFile(path.join(__dirname, filename)));
 }
 app.get('/book/:id', (req, res) => {
@@ -201,6 +204,11 @@ app.get('/book/:id', (req, res) => {
     return res.sendFile(path.join(__dirname, 'index.html'));
 });
 app.get('/libs/jszip.min.js', (req, res) => res.sendFile(path.join(__dirname, 'libs', 'jszip.min.js')));
+for (const filename of ['layout-bundle.js', 'cloud-reader.js', 'range-archive.js', 'upload-queue.js',
+    'pdf-outline.js', 'pdf-reader.js', 'pdf-viewer.js', 'pdf-layout-view.js', 'pdf-layout.css',
+    'server-reader.js', 'pdf-layout-core.mjs', 'pdf-fonts.mjs']) {
+    app.get(`/reader-core/${filename}`, (req, res) => res.sendFile(path.join(__dirname, '..', 'hosting', 'public', filename)));
+}
 for (const directory of ['katex/dist', 'pdfjs-dist/build', 'pdfjs-dist/cmaps', 'pdfjs-dist/standard_fonts', 'pdfjs-dist/wasm']) {
     app.use(`/node_modules/${directory}`, express.static(path.join(__dirname, 'node_modules', directory), { dotfiles: 'deny', index: false, redirect: false }));
 }
@@ -253,6 +261,14 @@ function getBookArchivePath(book) {
     const relativePath = path.relative(uploadsRoot, archivePath);
     if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return null;
     return archivePath;
+}
+
+function scheduleLayout(book) {
+    const archivePath = getBookArchivePath(book);
+    if (!archivePath || !/\.(?:epub|htmlz|zip)$/i.test(archivePath)) return;
+    layoutQueue.ensure({ bookId: book.id, archivePath }).catch(error => {
+        if (!stopping) console.warn('Layout bundle scheduling failed:', error.message);
+    });
 }
 
 function getEpubEntryMimeType(entryName) {
@@ -426,6 +442,24 @@ function serveEpubEntry(req, res) {
 // API: EPUB arşivinden tek bir kaynağı akış olarak getir
 app.get('/api/books/:id/epub', requireAuth, serveEpubEntry);
 app.get('/api/books/:id/epub/*', requireAuth, serveEpubEntry);
+app.get('/api/books/:id/layout', requireAuth, async (req, res) => {
+    try {
+        const book = ownedBook(req);
+        const archivePath = getBookArchivePath(book);
+        if (!archivePath) throw Object.assign(new Error('Geçersiz kitap arşivi yolu.'), { statusCode: 400 });
+        const state = await layoutQueue.ensure({ bookId: book.id, archivePath });
+        res.set('Cache-Control', 'private, no-store');
+        if (state.status === 'ready') {
+            res.set({ 'Content-Type': 'application/zip', 'X-Reader-Source-Version': state.sourceVersion,
+                'X-Content-Type-Options': 'nosniff' });
+            return res.sendFile(state.bundlePath);
+        }
+        if (state.status === 'failed') {
+            return res.status(422).json({ status: state.status, sourceVersion: state.sourceVersion, error: state.error });
+        }
+        return res.status(202).json({ status: state.status, sourceVersion: state.sourceVersion });
+    } catch (error) { sendError(res, error); }
+});
 app.get('/api/books/:id/pdf', requireAuth, async (req, res) => {
     try {
         const { pdfPath, ...descriptor } = await describeBook(ownedBook(req));
@@ -716,6 +750,7 @@ app.post('/api/books', requireAuth, upload.fields([{ name: 'bookFile', maxCount:
 
         library.push(newBook);
         saveDB();
+        scheduleLayout(newBook);
 
         res.json({ success: true, book: newBook });
     } catch (error) {
@@ -773,9 +808,11 @@ app.delete('/api/books/:id', requireAuth, async (req, res) => {
     library.splice(bookIndex, 1);
     try {
         saveDB();
+        const layoutDeletion = layoutQueue.deleteBook(id);
         if (ocrQueue) ocrQueue.deleteBook(id);
         metadataCache.delete(id);
         ocrRevisions.delete(id);
+        await layoutDeletion;
         // Stop new requests before waiting for queued work, then remove this book's cached pages.
         await pdfOcr.deleteBookCache(id, { waitForJobs: MODE === 'local' });
     } catch (error) {
@@ -840,11 +877,10 @@ async function shutdownServer() {
     }
     clearInterval(leaseRecovery);
     server.close();
-    try {
-        await pdfOcr.shutdown();
-    } catch (error) {
-        console.error('PDF OCR shutdown error:', error);
-    }
+    await Promise.all([
+        layoutQueue.shutdown().catch(error => console.error('Layout queue shutdown error:', error)),
+        pdfOcr.shutdown().catch(error => console.error('PDF OCR shutdown error:', error))
+    ]);
 }
 
 process.once('SIGINT', () => { shutdownServer().catch(error => console.error(error)); });

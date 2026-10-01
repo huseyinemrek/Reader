@@ -9,12 +9,14 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,600;1,400;1,600&family=Lora:ital,wght@0,400;0,600;1,400;1,600&family=Outfit:ital,wght@0,400;0,600;1,400;1,600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css?v=20260925_typography">
+    <link rel="stylesheet" href="/pdf-layout.css">
     <!-- JSZip for handling HTMLZ (Zip) files -->
     <script src="/libs/jszip.min.js"></script>
-    <!-- PDF.js for handling PDF files -->
-    <script src="/libs/pdf.min.js"></script>
-    <script>
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '/libs/pdf.worker.min.js';
+    <!-- Same native PDF/font engine as local/VPS; no server or OCR in hosting. -->
+    <script type="module">
+        import * as pdfjsLib from '/libs/pdf.mjs';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/libs/pdf.worker.mjs';
+        globalThis.pdfjsLib = pdfjsLib;
     </script>
     <!-- FontAwesome for Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css">
@@ -47,7 +49,7 @@
                     <i class="fa-solid fa-plus"></i> Yeni Kitap Ekle
                 </label>
                 <button id="logout-btn" class="upload-btn" style="background: #e53935;"><i class="fa-solid fa-right-from-bracket"></i> Çıkış</button>
-                <input type="file" id="book-upload" accept=".epub,.pdf,.html,.htm,.htmlz,.zip" style="display: none;">
+                <input type="file" id="book-upload" accept=".epub,.pdf,.html,.htm,.htmlz,.zip" multiple style="display: none;">
             </div>
         </header>
         
@@ -89,6 +91,7 @@
             <button class="icon-btn" id="back-to-library" title="Kütüphaneye Dön"><i class="fa-solid fa-arrow-left"></i></button>
             <div id="current-book-title">Kitap Adı</div>
             <button class="icon-btn" id="open-page-jump" title="Sayfaya Git (G)"><i class="fa-solid fa-bookmark"></i></button>
+            <button type="button" class="icon-btn" id="reader-upload-btn" title="Okurken kitap ekle" aria-label="Okurken kitap ekle"><i class="fa-solid fa-plus" aria-hidden="true"></i></button>
         </div>
 
         <!-- The actual book content -->
@@ -147,6 +150,12 @@
 
             <div class="setting-group" id="original-pdf-setting" hidden>
                 <label>PDF Görünümü</label>
+                <select id="pdf-layout">
+                    <option value="text-only">Yalnız metin</option>
+                    <option value="text-right">Metin sağda + PDF solda</option>
+                    <option value="text-left">Metin solda + PDF sağda</option>
+                </select>
+                <small>Ayırıcıyı sürükleyerek genişlikleri ayarlayın. Klavyede sol/sağ ok, Shift, Home/End kullanılabilir.</small>
                 <a id="open-original-pdf" class="mode-btn" target="_blank" rel="noopener noreferrer">
                     <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Orijinal PDF'yi tarayıcıda aç
                 </a>
@@ -300,6 +309,7 @@
         </div>
     </dialog>
 
+    <script src="/pdf-viewer.js"></script>
     <script type="module" src="/script.js?v=20260925_typography"></script>
 </body>
 </html>

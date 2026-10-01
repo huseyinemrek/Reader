@@ -8,14 +8,18 @@ Bu klasör Firebase Hosting, Cloud Firestore ve Cloud Storage altyapısı üzeri
 - **Range Streaming & Düşük Veri Tüketimi:** Kitapların tamamı tek seferde indirilmez; EPUB ve PDF dosyaları HTTP `Range` istekleriyle parça parça çekilir.
 - **Önceden Hesaplanmış Düzen (Layout Bundle):** EPUB yüklenirken görsel boyutları ve bölüm metinleri optimize edilmiş bir paket haline getirilir; ilk açılışta devasa resimler indirilmeden tam sayfa sayısı hesaplanabilir.
 - **Sayfa Sayfa ve Kaydırma Modları:** CSS Columns tabanlı çift yönlü sayfa çevirme ve akıcı dikey kaydırma modu.
+- **Ortak PDF okuyucu:** Kaynak yer işaretleri ve adlandırılmış/iç içe hedefler, yerleşik font vurgusu/göreli boyutlar, üç metin/PDF düzeni, klavye/fare ayırıcısı ve döşemeli kaynak yakınlaştırma.
+- **Okurken arka plan yükleme:** Üst menüde `+`, çoklu/tekrarlı seçim, kitap adı tooltip’i olan küçük yüzde dairesi; tamamlanma okuyucu sayfasını veya rotasını sıfırlamaz.
+- **OCR yok:** Yerleşik PDF metni ve kaynak görüntü kullanılır; taranmış sayfaya metin/font tahmini veya OCR/ev worker arayüzü eklenmez.
 
 ## Hızlı Kurulum
 
 ### 1. Ön Gereksinimler
 
-- [Node.js](https://nodejs.org/) (v18 veya üstü)
+- [Node.js](https://nodejs.org/) (22.13+ veya 24 LTS önerilir; yalnız CLI/test araçları, hosting’de Node sunucu çalışmaz)
 - [Firebase CLI](https://firebase.google.com/docs/cli) (`npm install -g firebase-tools`)
 - Firebase Konsolu'nda oluşturulmuş bir proje (Blaze / Pay-as-you-go planı Cloud Storage kullanımı için gereklidir)
+- Bütün gerçek hosting regresyonları için Java 21+ ve `local/` geliştirme bağımlılıkları; yalnız statik Hosting emülatörü Java gerektirmez.
 
 ### 2. Proje Yapılandırması
 
@@ -56,26 +60,9 @@ Storage üzerinden Range isteklerinin tarayıcıda sorunsuz çalışabilmesi iç
 gcloud storage buckets update gs://<PROJE_ID>.firebasestorage.app --cors-file=storage.cors.json
 ```
 
-Yerel Firebase yapılandırması ve açık konsol aynı `book-reader-upload` projesine, `book-reader-upload.firebasestorage.app` bucket'ına işaret ediyor. Bu uzantı yeni Firebase bucket'ları için doğrudur; `.appspot.com` ile değiştirmeyin.
+Yerel Firebase yapılandırması `book-reader-upload` projesinin `book-reader-upload.firebasestorage.app` bucket’ını kullanır. Bu uzantı yeni Firebase bucket’ları için doğrudur; `.appspot.com` ile değiştirmeyin. Önceki billing/kota incelemesinin gözlemleri güncel bir kesinti iddiası değildir.
 
-Canlı konsolda görülenler:
-
-- Proje Blaze planında ve bir Cloud Billing hesabına bağlı. **Cloud Billing > Account management ekranında hesabın vadesi geçmiş ödemesi veya geçerli ödeme bilgisi bulunmadığına ilişkin kırmızı hata var.** Aynı ekran `book-reader-upload` projesinin bu hesaba bağlı olduğunu gösteriyor.
-- Firebase ve Google Cloud dosya listelerinde bucket boş görünüyor. Storage kullanım ekranı veri göstermiyor; kullanım verileri gecikmeli olduğundan bu tek başına geçmiş kota tüketimini kanıtlamaz.
-- Yayınlanmış Storage kuralı giriş yapan kullanıcının yalnızca kendi `users/{uid}/...` alanını okumasına/yazmasına izin veriyor; uygulamanın mevcut dosya yollarıyla uyumlu.
-- Mevcut aylık 300 TL bütçe bir uyarı bütçesi. Konsolda harcama 0 TL, harcama durdurma durumu uygulanamaz olarak görünüyor.
-- Google Cloud Configuration sekmesi `storage.buckets.get` ve `storage.buckets.getIamPolicy` izinleri eksik uyarısı verdi. Bu oturumla bucket bölgesi ve mevcut CORS ayarı doğrulanamadı.
-
-İlk giderilmesi gereken somut sorun **Cloud Billing hesabının ödeme durumu**. Blaze etiketi hesabın geçerli ödeme bilgisine sahip olduğunu garanti etmiyor. Hesap sahibi Google Cloud Billing içindeki **Payment overview** sayfasında gösterilen işlemi tamamlamalı; ödeme bilgisi değiştirilmedi veya ödeme yapılmadı. Hosting'de boş yer bulunması bu sorunu çözmez. Firebase `storage/quota-exceeded` kodunu gerçek kota aşımı yanında Storage faturalandırma erişimi kapalı olduğunda da döndürebilir; görülen billing uyarısı bu hatayla uyumludur. Başarısız yüklemenin ham HTTP yanıtı alınmadığından bunun tek neden olduğu henüz doğrulanmadı. [Firebase hata kodları](https://firebase.google.com/docs/storage/web/handle-errors), [Storage faturalandırma gereklilikleri](https://firebase.google.com/docs/storage/faqs-storage-changes-announced-sept-2024).
-
-Billing uyarısı giderildikten sonra hata sürerse proje/billing yöneticisinin aynı proje üzerinde şunları kontrol etmesi gerekir:
-
-1. Başarısız yüklemenin tarayıcı Network ekranındaki HTTP durumu ve yanıt gövdesi: özellikle `402`, `403`, `429`, `UserProjectAccountProblem` veya kota adı. İndirme token'larını paylaşmayın.
-2. Cloud Billing hesabının etkin olması ve ödeme/hesap kısıtlaması bulunmaması; Blaze etiketi tek başına tüm bu durumları açıklamaz.
-3. Cloud Storage bucket konumu, Google Cloud Quotas & System Limits ve ilgili servislerin durumu. Bölge, Firestore bölgesinden bağımsız olabilir.
-4. Yanıt servis hesabı/IAM sorununu belirtiyorsa Firebase Storage servis hesabı yapılandırması. Genel bir çözüm olarak kitapları herkese açık yapmayın veya kuralları `allow read, write: if true` olarak değiştirmeyin.
-
-İnceleme sırasında canlı deployment, kural/CORS değişikliği, dosya yükleme veya billing değişikliği yapılmadı.
+Yeni bir `storage/quota-exceeded` hatasında başarısız isteğin gerçek HTTP durumunu ve gövdesini, hesabın etkin ödeme durumunu, Storage kotasını ve yanıtın işaret ettiği IAM izinlerini kontrol edin. Blaze etiketi, Hosting kotası veya uyarı bütçesi tek başına Storage erişimini/harcama tavanını garanti etmez. Kitapları herkese açık yapmak ya da kuralları `allow read, write: if true` yapmak çözüm değildir. İndirme token’larını paylaşmayın. [Firebase hata kodları](https://firebase.google.com/docs/storage/web/handle-errors), [Storage faturalandırma gereklilikleri](https://firebase.google.com/docs/storage/faqs-storage-changes-announced-sept-2024).
 
 ## Ücretsiz kullanım hangi ürüne ait?
 
@@ -103,6 +90,15 @@ PDF sabit sayfalıdır: orijinal sayfa sayısı font ayarından etkilenmez. Okuy
 
 Range yanıtının `206 Partial Content` olması ve okunabilir, doğru bir `Content-Range` taşıması gerekir. Sunucu `200 OK` ile dosyanın tamamını göndermeye çalışırsa uygulama hatayı göstermeli ve sessizce tam dosyaya geçmemelidir. EPUB/PDF objelerine `Content-Encoding: gzip` vermeyin; Cloud Storage indirme sırasında dönüştürme yaparsa `Range` başlığını yok sayabilir. [Range indirme belgesi](https://docs.cloud.google.com/storage/docs/downloading-objects).
 
+## Ortak PDF tipografisi ve yükleme kuyruğu
+
+PDF.js 6 ile yerleşik font metadata’sı okunur; normal/italik/oblik/kalın ve göreli başlık/dipnot ölçüleri metin parçalarıyla korunur. Kullanıcının seçtiği aile, renk ve temel boyut kaynak vurgusunu silmez. **Ayarlar → PDF Görünümü** yalnız metin veya iki yönlü kaynak PDF/metin düzeni sunar; ayırıcı fare/dokunma ve ok/Shift/Home/End tuşlarıyla ayarlanır. Kaynak sayfa döşemelerle %500’e kadar yeniden çizilir. Yer işareti yoksa kütüphane kaydından uydurma içindekiler kullanılmaz.
+
+Kütüphaneden veya üst okuyucu menüsündeki `+` ile birden fazla dosya seçebilirsiniz; sonraki seçim kuyruğa eklenir. Hazırlama ve kayıt sonlandırma belirsiz aşamalar, Storage aktarımı gerçek byte yüzdesidir. Orijinal kitap, düzen paketi ve kapak aktarımı bitip Firestore kaydı tamamlanmadan `%100` gösterilmez. Dairenin tooltip’i hazırlanan gerçek kitap adını ve aşamasını gösterir. Kuyruk okuyucu etkileşimini engellemez; tamamlanma yalnız kütüphaneyi sessizce yeniler.
+
+Kuyruk dosyaları yalnız açık sekmenin belleğindedir, IndexedDB/localStorage’da yükleme işi tutulmaz. Bekleyen/çalışan işte kapatma/yenileme uyarısı vardır; sekme kapandıktan sonra otomatik devam yoktur. Tamamlanmış kitaplar Storage/Firestore’da kalır. Hatalı iş sonraki kitabı durdurmaz; yeniden deneme veya listeden kaldırma sunulur. Çıkış/hesap değişimi eski hesabın işlerini iptal eder. Kuyruk OCR sistemi değildir.
+
+
 ## Veri yolları ve erişim
 
 | Yol | İçerik |
@@ -116,7 +112,7 @@ Yeni düzen kaydı `layoutUrl`, `layoutStoragePath`, `layoutVersion: 1` ve `file
 
 ## Yerelde açma ve yayınlama
 
-Komutları bu `edge-reader` klasöründe çalıştırın. Firebase CLI ve Google Cloud CLI kurulu ve ilgili proje hesabıyla oturum açılmış olmalıdır.
+Komutları bu `hosting/` klasöründe çalıştırın. Firebase CLI ve Google Cloud CLI kurulu ve ilgili proje hesabıyla oturum açılmış olmalıdır.
 
 ```powershell
 firebase login
@@ -155,3 +151,8 @@ Bu işlem bucket'ın mevcut CORS listesini değiştirir; başka bir uygulama kul
 Tarayıcı geliştirici araçlarında gerçek Storage isteğini kontrol edin: `Range: bytes=...`, HTTP `206`, `Content-Range: bytes başlangıç-bitiş/toplam`, uygun `Access-Control-Allow-Origin` ve JavaScript'e açık `Content-Range`. `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag` başlıkları CORS dosyasında listelenir. GCS API türleri CORS'u farklı uygular; Firebase download endpoint'i üzerindeki gerçek yanıtı doğrulamadan bu ayarın tek başına yeterli olduğunu varsaymayın. [CORS davranışı](https://docs.cloud.google.com/storage/docs/cross-origin).
 
 Yeni EPUB ile son kontrol: ilk açılışta büyük görsellerin tamamının inmediğini, sayfa değiştirince gereken görselin geldiğini, font büyütünce toplam sayfanın yeniden hesaplandığını ve aynı hesaptaki ikinci cihazda kitabın açıldığını doğrulayın. Bu kontrol bucket erişimi sağlandıktan sonra yapılmalıdır.
+
+## Commit öncesi gerçek üç-sürüm kontrolü
+
+Depo kökünden `npm --prefix local run check` komutunu çalıştırın; hazırlık ve Java 21 ayarı [local/README.md](../local/README.md#commit-öncesi-kalıcı-regresyon-kontrolü) içinde açıklanır. Hosting vakaları izole resmi Firebase Auth/Firestore/Storage/Hosting emülatörlerinde gerçek SDK, kitap byte’ları ve üretim kurallarıyla çalışır; canlı projeye yükleme/silme gönderilmez. Testteki aynı-origin yönlendirmesi Storage emülatörünün eksik CORS header açılımını giderir, Range/byte/yanıtları değiştirmez; canlı bucket CORS kontrolünün yerine geçmez.
+

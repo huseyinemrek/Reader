@@ -39,6 +39,7 @@ library.json
 # VPS persistent job queue and isolated runtime data
 **/compute-jobs.json
 **/compute-jobs.json.*
+**/layout-cache/
 **/data/
 **/.smoke-*/
 *.epub

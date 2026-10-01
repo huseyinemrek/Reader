@@ -1,3 +1,10 @@
+import { RESOURCE_BASE, hydrateVisibleAssets, normalizeInlineStyle } from '/reader-core/cloud-reader.js';
+import { createServerBookResources } from '/reader-core/server-reader.js';
+import { createUploadQueue, uploadHttp } from '/reader-core/upload-queue.js';
+import { loadPdfOutline, renderPdfToc } from '/reader-core/pdf-outline.js';
+import { createPdfLayoutView, createPdfPage } from '/reader-core/pdf-layout-view.js';
+import { renderNativePdfBlocks } from '/reader-core/pdf-reader.js';
+
 // --- Firebase Auth Entegrasyonu (Dinamik ve Sıfır Kod Düzenleme) ---
 let auth = null;
 let signInWithEmailAndPassword = null;
@@ -163,6 +170,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         logoutBtn.addEventListener('click', async () => {
             if (auth && signOut) {
                 closeReader();
+                uploadQueue.cancelOwner(currentUser?.uid);
                 await signOut(auth);
             }
         });
@@ -171,7 +179,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let currentBookId = null;
     let scrollSaveTimeout = null;
     let globalLibrary = []; // API'den gelen kitapları tutar
-    // Page counts are measured per chapter; no archive or chapter HTML cache.
+    // Layout bundles carry text/CSS/image geometry; illustration bytes load only when visible.
     let currentBookType = null;
     let epubSpine = [];
     let currentChapterIndex = 0;
@@ -181,12 +189,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     let currentPdfDoc = null;
     let currentPdfLoadingTask = null;
     let currentPdfOutline = [];
-    let pdfZoom = null;
     let currentPdfMetadata = null;
     let ocrPolicyChanging = false;
     let computeTrackAbort = null;
-    let pdfSplitDrag = null;
-    let suppressPdfClickUntil = 0;
     let pdfReadingAnchor = null;
     const pdfPageStates = new Map();
     const pdfResources = {
@@ -211,13 +216,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     let htmlSource = '';
     let pendingProgress = null;
     let progressWrite = Promise.resolve();
-    const stylesheetCache = new Map();
+    let bookResources = null;
+    let htmlResourceUrl = null;
+    let visibleAssetFrame = null;
+
+    function loadVisibleAssets() {
+        if (visibleAssetFrame) return;
+        visibleAssetFrame = requestAnimationFrame(() => {
+            visibleAssetFrame = null;
+            if (!bookResources) return;
+            const bounds = currentSettings.readingMode === 'paged'
+                ? bookViewport.getBoundingClientRect()
+                : { left: 0, right: innerWidth, top: 0, bottom: innerHeight };
+            hydrateVisibleAssets(bookResources, bookContent, bounds, error => {
+                pagedIndicator.title = 'Görsel yüklenemedi: ' + error.message;
+            });
+        });
+    }
     const libraryView = document.getElementById('library-view');
     const readerView = document.getElementById('reader-view');
     const libraryGrid = document.getElementById('library-grid');
     const fileInput = document.getElementById('book-upload');
+    document.getElementById('reader-upload-btn').addEventListener('click', () => fileInput.click());
     const loadingOverlay = document.getElementById('loading-overlay');
     const loadingText = document.getElementById('loading-text');
+    const uploadOwner = () => currentUser?.uid ?? (auth ? null : 'local_user');
+    const uploadQueue = createUploadQueue({
+        getOwnerKey: uploadOwner,
+        run: uploadBook,
+        onComplete: async (_, { ownerKey }) => {
+            if (uploadOwner() === ownerKey) await loadLibrary();
+        }
+    });
     
     const bookContent = document.getElementById('book-content');
     const currentBookTitle = document.getElementById('current-book-title');
@@ -453,6 +483,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
 
     let currentSettings = { ...defaultSettings };
+    const pdfLayoutView = createPdfLayoutView({
+        root: bookContent, getSettings: () => currentSettings,
+        getDocument: () => currentPdfDoc, getCurrentPage: () => currentPdfPage,
+        getStates: () => pdfPageStates,
+        captureAnchor: capturePdfReadingAnchor, restoreAnchor: restorePdfReadingAnchor,
+        onSettingsChange: () => localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings)),
+        onInteraction: ({ type }) => {
+            if (['drag-end', 'keyboard', 'zoom'].includes(type)) {
+                pdfReadingAnchor = capturePdfReadingAnchor();
+                if (currentBookId) saveCurrentProgress();
+            }
+        }
+    });
 
     function loadSettings() {
         const userDefault = localStorage.getItem('edgeReaderUserDefaultSettings');
@@ -520,7 +563,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 bookViewport.scrollLeft = 0;
             }
         }
-        applyPdfLayout();
+        pdfLayoutView.apply();
     }
 
     function updateUI() {
@@ -592,7 +635,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (pdfAnchor?.section) currentPdfPage = currentGlobalPage = Number(pdfAnchor.section.dataset.pageIndex);
             localPagedIndex = currentPdfPage - 1;
             updatePagedView();
-            applyPdfLayout();
+            pdfLayoutView.apply();
             if (mode === 'paged') window.scrollTo({top: 0, behavior: 'instant'});
             restorePdfReadingAnchor(pdfAnchor);
             saveCurrentProgress();
@@ -668,11 +711,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // --- Library Management (Node.js API) ---
 
     async function loadLibrary() {
+        const ownerKey = uploadOwner();
         libraryGrid.innerHTML = '';
         try {
+            await progressWrite;
+            if (uploadOwner() !== ownerKey) return;
             const res = await authFetch('/api/books');
-            globalLibrary = await res.json();
+            const books = await res.json();
             const assetToken = await getAuthToken();
+            if (uploadOwner() !== ownerKey) return;
+            globalLibrary = books;
             
             if (globalLibrary.length === 0) {
                 libraryGrid.innerHTML = '<p style="color:#888; grid-column: 1/-1; text-align:center;">Kütüphaneniz boş. Yukarıdan kitap ekleyerek başlayabilirsiniz.</p>';
@@ -746,7 +794,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         closePageJumpModal();
         disposePdfPages();
         computeTrackAbort?.abort();
-        finishPdfSplitDrag();
+        pdfLayoutView.reset();
         computePanel.hidden = true;
         computePanel.open = false;
         pdfOcrSetting.hidden = originalPdfSetting.hidden = true;
@@ -760,11 +808,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentPdfLoadingTask = null;
         currentPdfDoc = null;
         currentPdfOutline = [];
-        pdfZoom = null;
         currentBookId = null;
         currentBookType = null;
         epubSpine = [];
-        stylesheetCache.clear();
+        bookResources?.dispose();
+        bookResources = null;
+        htmlResourceUrl = null;
+        if (visibleAssetFrame) cancelAnimationFrame(visibleAssetFrame);
+        visibleAssetFrame = null;
         htmlSource = '';
         bookContent.replaceChildren();
         bookContent.classList.remove('pdf-content');
@@ -792,8 +843,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function getLayoutKey() {
         const s = currentSettings;
-        return JSON.stringify([4, innerWidth, innerHeight, devicePixelRatio,
-            s.fontSize, s.fontFamily, s.lineHeight, s.maxWidth, s.sidePadding, s.paragraphSpacing]);
+        return JSON.stringify([5, innerWidth, innerHeight, devicePixelRatio,
+            s.fontSize, s.fontFamily, s.lineHeight, s.maxWidth, s.sidePadding, s.paragraphSpacing,
+            bookResources?.sourceVersion]);
     }
 
     function commitPageMap(counts) {
@@ -822,6 +874,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             bookViewport.scrollTo({left: localPagedIndex * bookViewport.clientWidth, behavior: 'instant'});
         }
         updatePagedIndicator();
+        loadVisibleAssets();
     }
 
     function updatePagedIndicator() {
@@ -879,13 +932,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         pendingProgress = null;
         const book = globalLibrary.find(b => b.id === id);
         if (book) Object.assign(book, data);
-        progressWrite = progressWrite.catch(() => {}).then(async () => {
+        progressWrite = progressWrite.then(async () => {
             const response = await authFetch('/api/books/' + id + '/progress', {
                 method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data), keepalive: true
             });
             if (!response.ok) throw new Error('Okuma konumu kaydedilemedi.');
-        });
-        progressWrite.catch(error => console.error(error));
+        }).catch(error => console.error(error));
     }
 
     function saveCurrentProgress() {
@@ -922,6 +974,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         paginationAbort = new AbortController();
         const signal = paginationAbort.signal;
         const token = session;
+        if (bookResources) await bookResources.layoutReady;
+        signal.throwIfAborted();
         layoutKey = getLayoutKey();
         const key = layoutKey;
         totalBookPages = currentBookType === 'pdf' ? totalPdfPages : 0;
@@ -976,7 +1030,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 let section;
                 try {
                     section = currentBookType === 'epub'
-                        ? await loadEpubChapter(index, doc, signal) : makeHtmlSection(doc);
+                        ? await loadEpubChapter(index, doc, signal) : await makeHtmlSection(doc);
                 } catch (error) {
                     if (currentBookType !== 'epub' || error.status !== 404 || error.url !== epubSpine[index].url) throw error;
                     // Missing archive content is not a page. Keep the spine position
@@ -1026,7 +1080,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             section = await loadEpubChapter(chapterIndex);
         } else if (type === 'pdf') {
             section = createPdfPageSection(localPage + 1);
-        } else section = makeHtmlSection(document);
+        } else section = await makeHtmlSection(document);
         if (token !== session || location !== locationVersion) return;
         stopTTS();
         disposePdfPages();
@@ -1048,6 +1102,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             updatePagedIndicator();
         }
         if (type === 'pdf') pdfReadingAnchor = capturePdfReadingAnchor();
+        loadVisibleAssets();
     }
 
     async function navigate(action) {
@@ -1073,7 +1128,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function goToPage(page) {
-        if (pdfSplitDrag || !Number.isSafeInteger(page) || page < 1 || page > totalBookPages) return;
+        if (pdfLayoutView.isDragging || !Number.isSafeInteger(page) || page < 1 || page > totalBookPages) return;
         await navigate(async () => {
             if (currentBookType === 'epub') {
                 const index = epubSpine.findIndex(ch => page < ch.startPage + ch.pageCount);
@@ -1110,7 +1165,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Keep only the visible scroll chapter and its neighbours hydrated. Empty
     // placeholders preserve scroll offsets and are rehydrated when revisited.
     async function updateScrollWindow() {
-        if (scrollWindowBusy || isNavigatingPage || pdfSplitDrag || currentSettings.readingMode !== 'scroll' || !['epub', 'pdf'].includes(currentBookType)) return;
+        if (scrollWindowBusy || isNavigatingPage || pdfLayoutView.isDragging || currentSettings.readingMode !== 'scroll' || !['epub', 'pdf'].includes(currentBookType)) return;
         scrollWindowBusy = true;
         const token = session;
         const location = locationVersion;
@@ -1163,12 +1218,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             localPagedIndex = isEpub ? Math.floor(ratio * (epubSpine[index].pageCount || 1)) : index;
             updatePagedIndicator();
             saveCurrentProgress();
+            loadVisibleAssets();
         } catch (error) {
             if (error.name !== 'AbortError') console.error(error);
         } finally {if (token === session) scrollWindowBusy = false;}
     }
 
     window.addEventListener('scroll', () => {
+        loadVisibleAssets();
         if (!currentBookId || currentSettings.readingMode !== 'scroll' || isNavigatingPage) return;
         if (currentBookType === 'epub' || currentBookType === 'pdf') updateScrollWindow();
         else if (currentBookType === 'html') {
@@ -1213,7 +1270,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     pagedPrevBtn.addEventListener('click', goToPrevPage);
     pagedNextBtn.addEventListener('click', goToNextPage);
     bookViewport.addEventListener('click', event => {
-        if (pdfSplitDrag || performance.now() < suppressPdfClickUntil || currentSettings.readingMode !== 'paged' ||
+        if (pdfLayoutView.isDragging || currentSettings.readingMode !== 'paged' ||
             event.target.closest('a,button,input,select,[role="separator"]') || window.getSelection().toString()) return;
         const rect = bookViewport.getBoundingClientRect();
         const x = event.clientX - rect.left;
@@ -1228,7 +1285,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
     window.addEventListener('keydown', event => {
-        if (!currentBookId || pdfSplitDrag || pageJumpModal.open ||
+        if (!currentBookId || pdfLayoutView.isDragging || pageJumpModal.open ||
             event.target.closest('input,textarea,select,[contenteditable="true"],[role="separator"]')) return;
         if (event.ctrlKey || event.altKey || event.metaKey) return;
         if (event.key === 'Escape') {closeSidebar(settingsSidebar); closeSidebar(tocSidebar); return;}
@@ -1246,7 +1303,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function scheduleRepagination() {
         if (currentBookType === 'pdf') {
             const anchor = pdfReadingAnchor;
-            applyPdfLayout();
+            pdfLayoutView.apply();
             restorePdfReadingAnchor(anchor);
             return;
         }
@@ -1286,7 +1343,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             const fileName = book.fileName.toLowerCase();
             if (fileName.endsWith('.epub')) {
                 currentBookType = 'epub';
-                resourceBase = location.origin + '/api/books/' + encodeURIComponent(id) + '/epub/';
+                resourceBase = RESOURCE_BASE;
+                bookResources = await createServerBookResources(book, {
+                    signal: sessionAbort.signal, request: authFetch,
+                    assetUrl: async url => authenticatedAsset(url, await getAuthToken())
+                });
                 await loadEpubSpine();
             } else if (fileName.endsWith('.pdf')) {
                 currentBookType = 'pdf';
@@ -1318,13 +1379,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             } else {
                 currentBookType = 'html';
-                const response = await authFetch(book.bookUrl, {signal: sessionAbort.signal});
                 if (/\.(htmlz|zip)$/.test(fileName)) {
-                    const zip = await JSZip.loadAsync(await response.arrayBuffer());
-                    const main = Object.keys(zip.files).find(name => /\.html?$/.test(name));
+                    resourceBase = RESOURCE_BASE;
+                    bookResources = await createServerBookResources(book, {
+                        signal: sessionAbort.signal, request: authFetch,
+                        assetUrl: async url => authenticatedAsset(url, await getAuthToken())
+                    });
+                    const main = (await bookResources.names()).find(name => /\.html?$/i.test(name));
                     if (!main) throw new Error('Arşivde HTML bulunamadı.');
-                    htmlSource = extractBodyContent(await zip.file(main).async('string'));
-                } else htmlSource = extractBodyContent(await response.text());
+                    htmlResourceUrl = new URL(main.split('/').map(encodeURIComponent).join('/'), RESOURCE_BASE).href;
+                    htmlSource = await bookResources.text(htmlResourceUrl);
+                } else {
+                    const response = await authFetch(book.bookUrl, { signal: sessionAbort.signal });
+                    if (!response.ok) throw new Error('Kitap dosyası alınamadı.');
+                    htmlSource = extractBodyContent(await response.text());
+                }
             }
             if (token !== session) return;
             if (originalPdfSetting) originalPdfSetting.hidden = currentBookType !== 'pdf';
@@ -1369,67 +1438,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         } finally {if (token === session) hideLoading();}
     }
 
-    async function loadPdfOutline(pdf, signal) {
-        const outline = await pdf.getOutline();
-        signal.throwIfAborted();
-        async function resolve(entries) {
-            return Promise.all(entries.map(async entry => {
-                signal.throwIfAborted();
-                let page = null;
-                if (entry.dest) {
-                    try {
-                        const destination = typeof entry.dest === 'string'
-                            ? await pdf.getDestination(entry.dest) : entry.dest;
-                        if (Array.isArray(destination) && destination.length) {
-                            const reference = destination[0];
-                            const index = Number.isInteger(reference) ? reference
-                                : reference && typeof reference === 'object' ? await pdf.getPageIndex(reference) : -1;
-                            if (index >= 0 && index < pdf.numPages) page = index + 1;
-                        }
-                    } catch (error) {
-                        signal.throwIfAborted();
-                        console.warn('PDF içindekiler hedefi çözülemedi:', entry.title, error);
-                    }
-                }
-                const items = await resolve(entry.items || []);
-                signal.throwIfAborted();
-                return {title: entry.title, page, bold: entry.bold, italic: entry.italic, items};
-            }));
-        }
-        return resolve(outline || []);
-    }
-
-    function renderPdfToc(entries, list) {
-        for (const entry of entries) {
-            const li = document.createElement('li');
-            const label = document.createElement(entry.page ? 'a' : 'span');
-            label.textContent = entry.title;
-            if (entry.bold) label.style.fontWeight = 'bold';
-            if (entry.italic) label.style.fontStyle = 'italic';
-            if (entry.page) {
-                label.href = '/book/' + encodeURIComponent(currentBookId) + '?page=' + entry.page;
-                label.dataset.pdfPage = entry.page;
-                label.title = 'PDF sayfası ' + entry.page;
-                label.addEventListener('click', async event => {
-                    event.preventDefault();
-                    closeSidebar(tocSidebar);
-                    await goToPage(entry.page);
-                });
-            } else label.className = 'toc-group-title';
-            li.appendChild(label);
-            if (entry.items.length) {
-                const children = document.createElement('ul');
-                renderPdfToc(entry.items, children);
-                li.appendChild(children);
-            }
-            list.appendChild(li);
-        }
-    }
 
     function renderToc(book) {
         tocList.replaceChildren();
         if (currentBookType === 'pdf') {
-            renderPdfToc(currentPdfOutline, tocList);
+            renderPdfToc(currentPdfOutline, tocList, {
+                bookId: currentBookId,
+                onNavigate: async page => { closeSidebar(tocSidebar); await goToPage(page); }
+            });
             if (!tocList.children.length) tocList.textContent = 'PDF’de yer işareti/içindekiler kaydı bulunamadı.';
             return;
         }
@@ -1453,62 +1469,59 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // --- File Processing (Adding to API) ---
 
-    fileInput.addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        showLoading("Kitap sunucuya yükleniyor...");
-        try {
-            const fileName = file.name.toLowerCase();
-            let title = file.name.replace(/\.[^/.]+$/, ""); // Default to filename
-            let coverBlob = null;
-            let toc = [];
-
-            // İstemci tarafında metadataları çıkartıyoruz (Sunucuyu yormamak ve bağımlılık eklememek için)
-            if (fileName.endsWith('.epub')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const zip = await JSZip.loadAsync(arrayBuffer);
-                const meta = await extractEpubMeta(zip);
-                if (meta.title) title = meta.title;
-                if (meta.coverBlob) coverBlob = meta.coverBlob;
-                if (meta.toc) toc = meta.toc;
-            } else if (fileName.endsWith('.pdf')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const loadingTask = pdfjsLib.getDocument({...pdfResources, data: arrayBuffer});
-                try {
-                    const pdf = await loadingTask.promise;
-                    const meta = await pdf.getMetadata();
-                    if (meta.info && meta.info.Title) title = meta.info.Title;
-                } finally { await loadingTask.destroy(); }
-            }
-
-            // FormData ile dosyayı ve bilgileri sunucuya gönder
-            const formData = new FormData();
-            formData.append('bookFile', file);
-            formData.append('fileName', fileName);
-            formData.append('title', title);
-            formData.append('toc', JSON.stringify(toc));
-            if (coverBlob) {
-                formData.append('coverBlob', coverBlob, 'cover.jpg');
-            }
-
-            const res = await authFetch('/api/books', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!res.ok) throw new Error("Sunucu yüklemeyi reddetti.");
-
-            fileInput.value = ""; // reset
-            await loadLibrary();
-
-        } catch (error) {
-            console.error(error);
-            alert("Dosya yüklenirken hata oluştu: " + error.message);
-        } finally {
-            hideLoading();
-        }
+    fileInput.addEventListener('change', event => {
+        const files = [...event.target.files];
+        fileInput.value = '';
+        const ownerKey = uploadOwner();
+        if (files.length && ownerKey) uploadQueue.add(files, ownerKey);
     });
+
+    async function uploadBook(file, { report, signal, ownerKey, throwIfCancelled }) {
+        report({ stage: 'preparing', detail: 'Kitap bilgileri hazırlanıyor' });
+        const fileName = file.name.toLowerCase();
+        let title = file.name.replace(/\.[^/.]+$/, '');
+        let coverBlob = null;
+        let toc = [];
+        if (fileName.endsWith('.epub')) {
+            const zip = await JSZip.loadAsync(await file.arrayBuffer());
+            throwIfCancelled();
+            const meta = await extractEpubMeta(zip);
+            if (meta.title) title = meta.title;
+            coverBlob = meta.coverBlob;
+            toc = meta.toc;
+        } else if (fileName.endsWith('.pdf')) {
+            const loadingTask = pdfjsLib.getDocument({ ...pdfResources, data: await file.arrayBuffer() });
+            const abort = () => { void loadingTask.destroy(); };
+            signal.addEventListener('abort', abort, { once: true });
+            try {
+                throwIfCancelled();
+                const pdf = await loadingTask.promise;
+                const metadata = await pdf.getMetadata();
+                if (metadata.info?.Title) title = metadata.info.Title;
+            } finally {
+                signal.removeEventListener('abort', abort);
+                await loadingTask.destroy();
+            }
+        }
+        throwIfCancelled();
+        report({ stage: 'preparing', name: title, detail: 'Sunucuya aktarım hazırlanıyor' });
+        const user = currentUser;
+        if (user && user.uid !== ownerKey) throw new DOMException('Oturum değişti', 'AbortError');
+        const token = user ? await user.getIdToken() : null;
+        throwIfCancelled();
+        const formData = new FormData();
+        formData.append('bookFile', file);
+        formData.append('fileName', fileName);
+        formData.append('title', title);
+        formData.append('toc', JSON.stringify(toc));
+        if (coverBlob) formData.append('coverBlob', coverBlob, 'cover.jpg');
+        const book = await uploadHttp('/api/books', formData, {
+            token, signal,
+            onProgress: progress => report({ ...progress, detail: 'Kitap sunucuya aktarılıyor' })
+        });
+        throwIfCancelled();
+        return book;
+    }
 
     // --- Parser Helpers ---
 
@@ -1582,6 +1595,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function fetchText(url, signal = sessionAbort.signal, assetToken) {
+        if (bookResources) {
+            try { return await bookResources.text(url, signal); }
+            catch (error) { error.url = url; throw error; }
+        }
         const response = await authFetch(url, {signal}, assetToken);
         if (!response.ok) {
             const error = new Error('Kitap kaynağı alınamadı (' + response.status + '): ' + decodeURIComponent(url.split('/').at(-1)));
@@ -1610,183 +1627,27 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!epubSpine.length) throw new Error('EPUB bölümleri bulunamadı.');
     }
 
-    function resolveResource(value, base) {
-        const url = new URL(value, base);
-        if (!['http:', 'https:', 'data:'].includes(url.protocol)) return '';
-        return url.href;
-    }
 
     async function loadEpubChapter(index, targetDocument = document, signal = sessionAbort.signal) {
         const chapter = epubSpine[index];
         if (!chapter) throw new Error('Bölüm bulunamadı.');
-        const activeSessionSignal = sessionAbort.signal;
+        const resources = bookResources;
+        const html = await fetchText(chapter.url, signal);
         signal.throwIfAborted();
-        activeSessionSignal.throwIfAborted();
-        const assetToken = await getAuthToken();
+        const section = await resources.section(html, chapter.url, targetDocument, index, chapter.id);
         signal.throwIfAborted();
-        activeSessionSignal.throwIfAborted();
-        const html = await fetchText(chapter.url, signal, assetToken);
-        signal.throwIfAborted();
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        let css = '';
-        for (const style of doc.querySelectorAll('style')) {
-            css += await fixChapterCss(style.textContent, chapter.url, signal, assetToken);
-            style.remove();
-        }
-        for (const link of doc.querySelectorAll('link[rel="stylesheet"]')) {
-            const url = resolveResource(link.getAttribute('href'), chapter.url);
-            let text = stylesheetCache.get(url);
-            if (text === undefined) {
-                text = await fetchText(url, signal, assetToken);
-                signal.throwIfAborted();
-                stylesheetCache.set(url, text);
-            }
-            css += await fixChapterCss(text, url, signal, assetToken);
-        }
-        doc.querySelectorAll('script,iframe,object,embed,base,link,form').forEach(el => el.remove());
-        for (const el of doc.body.querySelectorAll('*')) {
-            for (const attr of Array.from(el.attributes)) {
-                if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
-                else if (el.namespaceURI === 'http://www.w3.org/2000/svg' && attr.name !== 'style' && /url\(/i.test(attr.value)) {
-                    el.setAttribute(attr.name, fixCssUrls(attr.value, chapter.url, assetToken));
-                }
-            }
-            if (el.hasAttribute('style')) {
-                el.style.color = el.style.backgroundColor = '';
-                normalizeChapterStyle(el.style);
-                el.setAttribute('style', fixCssUrls(el.getAttribute('style'), chapter.url, assetToken));
-            }
-            for (const name of ['src', 'href', 'xlink:href', 'poster']) {
-                const attr = el.getAttributeNode(name);
-                if (!attr) continue;
-                const assetReference = !['href', 'xlink:href'].includes(name) ||
-                    (el.namespaceURI === 'http://www.w3.org/2000/svg' && el.localName !== 'a');
-                // SVG fragment references target the hydrated document, not a fresh chapter response.
-                const resolved = assetReference && attr.value.trim().startsWith('#')
-                    ? attr.value : resolveResource(attr.value, chapter.url);
-                const value = assetReference ? authenticatedAsset(resolved, assetToken) : resolved;
-                if (attr.namespaceURI) el.setAttributeNS(attr.namespaceURI, name, value);
-                else el.setAttribute(name, value);
-            }
-            // EPUB images use src; an unresolved srcset must not escape the archive route.
-            el.removeAttribute('srcset');
-        }
-        signal.throwIfAborted();
-        activeSessionSignal.throwIfAborted();
-        const section = targetDocument.createElement('section');
-        section.className = 'epub-chapter';
-        section.id = chapter.id;
-        section.dataset.index = index;
-        section.dataset.loaded = 'true';
-        if (css) {
-            const style = targetDocument.createElement('style');
-            style.textContent = css;
-            section.appendChild(style);
-        }
-        while (doc.body.firstChild) section.appendChild(targetDocument.adoptNode(doc.body.firstChild));
         return section;
     }
 
-    function fixCssUrls(css, base, assetToken) {
-        return css.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]+))\s*\)/gi, (_, doubleQuoted, singleQuoted, unquoted) => {
-            const value = (doubleQuoted ?? singleQuoted ?? unquoted).trim();
-            const resolved = value.startsWith('#') ? value : resolveResource(value, base);
-            return 'url("' + authenticatedAsset(resolved, assetToken).replace(/"/g, '%22') + '")';
-        });
-    }
-
-    const absoluteFontSizeRatios = {
-        'xx-small': 0.5625,
-        'x-small': 0.625,
-        small: 0.8125,
-        medium: 1,
-        large: 1.125,
-        'x-large': 1.5,
-        'xx-large': 2,
-        'xxx-large': 3
-    };
-
-    function normalizeFontSize(value) {
-        const normalized = value.trim().toLowerCase();
-        let ratio;
-        if (Object.prototype.hasOwnProperty.call(absoluteFontSizeRatios, normalized)) {
-            ratio = absoluteFontSizeRatios[normalized];
-        } else {
-            const match = /^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(px|pt|rem)$/i.exec(normalized);
-            if (!match) return value;
-            const size = Number(match[1]);
-            ratio = match[2].toLowerCase() === 'px' ? size / 16
-                : match[2].toLowerCase() === 'pt' ? size / 12 : size;
-        }
-        return 'calc(var(--font-size) * ' + Number(ratio.toPrecision(8)) + ')';
-    }
-
-    function normalizeChapterStyle(style) {
-        for (let index = 0; index < style.length; index++) {
-            const property = style.item(index);
-            const value = style.getPropertyValue(property);
-            if (property.toLowerCase() === 'font-size') {
-                const normalized = normalizeFontSize(value);
-                if (normalized !== value) style.setProperty(property, normalized, style.getPropertyPriority(property));
-            } else if (property.toLowerCase() === 'text-align' && value.trim().toLowerCase() === 'justify') {
-                style.setProperty(property, 'start', style.getPropertyPriority(property));
-            }
-        }
-    }
-
-    async function fixChapterCss(css, base, signal, assetToken, seen = new Set()) {
-        if (seen.has(base)) return '';
-        seen = new Set([...seen, base]);
-        const imports = [...css.matchAll(/@import\s+(?:url\(\s*)?['"]([^'"]+)['"]\s*\)?[^;]*;/gi)];
-        for (const match of imports) {
-            const url = resolveResource(match[1], base);
-            let imported = '';
-            if (url && new URL(url).origin === location.origin) {
-                try {
-                    let text = stylesheetCache.get(url);
-                    if (text === undefined) {
-                        text = await fetchText(url, signal, assetToken);
-                        signal.throwIfAborted();
-                        stylesheetCache.set(url, text);
-                    }
-                    imported = await fixChapterCss(text, url, signal, assetToken, seen);
-                } catch (error) {
-                    signal.throwIfAborted();
-                    console.warn('EPUB stylesheet could not be loaded:', url, error);
-                }
-            }
-            css = css.replace(match[0], imported);
-        }
-        css = css.replace(/@import[^;]*;/gi, '').replace(/@namespace[^;]+;/gi, '');
-        const sheet = new CSSStyleSheet();
-        sheet.replaceSync(fixCssUrls(css, base, assetToken));
-        normalizeChapterRules(sheet.cssRules);
-        return Array.from(sheet.cssRules)
-            .filter(rule => rule.type !== CSSRule.PAGE_RULE && rule.type !== CSSRule.NAMESPACE_RULE)
-            .map(rule => rule.cssText)
-            .join('\n');
-    }
-
-    function normalizeChapterRules(rules) {
-        for (let index = rules.length - 1; index >= 0; index--) {
-            const rule = rules[index];
-            if (rule.style) normalizeChapterStyle(rule.style);
-            if (rule.type === 1) {
-                rule.selectorText = rule.selectorText.replace(/(^|[^\w-])(body|html)(?=[^\w-]|$)/gi, '$1.epub-chapter');
-            }
-            if (rule.cssRules) normalizeChapterRules(rule.cssRules);
-        }
-    }
 
 
-    function makeHtmlSection(doc) {
+    async function makeHtmlSection(doc) {
+        if (bookResources) return bookResources.section(htmlSource, htmlResourceUrl, doc);
         const section = doc.createElement('section');
         section.className = 'epub-chapter';
         section.dataset.index = '0';
         section.innerHTML = htmlSource;
-        for (const element of section.querySelectorAll('[style]')) {
-            normalizeChapterStyle(element.style);
-        }
+        for (const element of section.querySelectorAll('[style]')) normalizeInlineStyle(element.style);
         return section;
     }
 
@@ -1903,118 +1764,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         pdfReadingAnchor = capturePdfReadingAnchor();
     }
 
-    function pdfSplitBounds(columns) {
-        const columnWidth = columns.clientWidth;
-        const width = Math.max(1, columnWidth - 40);
-        const minimum = columnWidth ? Math.min(0.49, Math.max(0.2, 220 / width)) : 0.2;
-        return {minimum, maximum: 1 - minimum, width};
-    }
-
-    function applyPdfLayout() {
-        if (!['text-only', 'text-right', 'text-left'].includes(currentSettings.pdfLayout)) currentSettings.pdfLayout = 'text-right';
-        const ratio = Number(currentSettings.pdfTextRatio);
-        currentSettings.pdfTextRatio = Number.isFinite(ratio) ? Math.max(0.2, Math.min(0.8, ratio)) : 0.535;
-        bookContent.dataset.pdfLayout = currentSettings.pdfLayout;
-        for (const [section, state] of pdfPageStates) {
-            const columns = section.querySelector('.pdf-page-columns');
-            const bounds = pdfSplitBounds(columns);
-            const textRatio = Math.max(bounds.minimum, Math.min(bounds.maximum, currentSettings.pdfTextRatio));
-            const leftRatio = currentSettings.pdfLayout === 'text-left' ? textRatio : 1 - textRatio;
-            columns.style.setProperty('--pdf-left-fr', leftRatio + 'fr');
-            columns.style.setProperty('--pdf-right-fr', (1 - leftRatio) + 'fr');
-            const splitter = columns.querySelector('.pdf-splitter');
-            splitter.setAttribute('aria-valuemin', Math.round(bounds.minimum * 100));
-            splitter.setAttribute('aria-valuemax', Math.round(bounds.maximum * 100));
-            splitter.setAttribute('aria-valuenow', Math.round(leftRatio * 100));
-            splitter.setAttribute('aria-valuetext', `Metin genişliği yüzde ${Math.round(textRatio * 100)}`);
-            syncPdfViewer(section, state);
-        }
-    }
-
-    function syncPdfViewer(section, state) {
-        const wanted = currentSettings.pdfLayout !== 'text-only' &&
-            (currentSettings.readingMode !== 'paged' || Number(section.dataset.pageIndex) === currentPdfPage);
-        const column = section.querySelector('.pdf-page-image-column');
-        if (!wanted) {
-            state.viewer?.destroy();
-            state.viewer = null;
-            column.replaceChildren();
-        } else if (!state.viewer) {
-            state.viewer = new PdfPageViewer(column, currentPdfDoc, Number(section.dataset.pageIndex), {
-                zoom: pdfZoom, onZoom: zoom => {pdfZoom = zoom;}
-            });
-        } else state.viewer.schedule();
-    }
-
-    function setPdfSplitRatio(textRatio, anchor) {
-        currentSettings.pdfTextRatio = textRatio;
-        applyPdfLayout();
-        restorePdfReadingAnchor(anchor);
-    }
-
-    function finishPdfSplitDrag() {
-        const drag = pdfSplitDrag;
-        if (!drag) return;
-        pdfSplitDrag = null;
-        if (drag.splitter.hasPointerCapture(drag.pointerId)) drag.splitter.releasePointerCapture(drag.pointerId);
-        document.documentElement.classList.remove('pdf-split-dragging');
-        suppressPdfClickUntil = performance.now() + 350;
-        localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
-        pdfReadingAnchor = capturePdfReadingAnchor();
-        if (currentBookId) saveCurrentProgress();
-    }
-
-    bookContent.addEventListener('pointerdown', event => {
-        const splitter = event.target.closest('.pdf-splitter');
-        if (!splitter || event.button !== 0 || pdfSplitDrag) return;
-        event.preventDefault();
-        event.stopPropagation();
-        window.getSelection()?.removeAllRanges();
-        splitter.focus({preventScroll: true});
-        pdfSplitDrag = {splitter, pointerId: event.pointerId, anchor: capturePdfReadingAnchor()};
-        splitter.setPointerCapture(event.pointerId);
-        document.documentElement.classList.add('pdf-split-dragging');
-    });
-    bookContent.addEventListener('pointermove', event => {
-        if (!pdfSplitDrag || event.pointerId !== pdfSplitDrag.pointerId) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const columns = pdfSplitDrag.splitter.parentElement;
-        const bounds = pdfSplitBounds(columns);
-        const left = (event.clientX - columns.getBoundingClientRect().left - 20) / bounds.width;
-        const textRatio = currentSettings.pdfLayout === 'text-left' ? left : 1 - left;
-        setPdfSplitRatio(Math.max(bounds.minimum, Math.min(bounds.maximum, textRatio)), pdfSplitDrag.anchor);
-    });
-    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-        bookContent.addEventListener(name, event => {
-            if (!pdfSplitDrag || event.pointerId !== pdfSplitDrag.pointerId) return;
-            event.preventDefault();
-            event.stopPropagation();
-            finishPdfSplitDrag();
-        });
-    }
-    bookContent.addEventListener('click', event => {
-        if (event.target.closest('.pdf-splitter') || performance.now() < suppressPdfClickUntil) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-        }
-    }, true);
-    bookContent.addEventListener('keydown', event => {
-        const splitter = event.target.closest('.pdf-splitter');
-        if (!splitter || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const bounds = pdfSplitBounds(splitter.parentElement);
-        const textLeft = currentSettings.pdfLayout === 'text-left';
-        const left = textLeft ? currentSettings.pdfTextRatio : 1 - currentSettings.pdfTextRatio;
-        const next = event.key === 'Home' ? bounds.minimum : event.key === 'End' ? bounds.maximum
-            : left + (event.key === 'ArrowRight' ? 1 : -1) * (event.shiftKey ? 0.1 : 0.02);
-        const clamped = Math.max(bounds.minimum, Math.min(bounds.maximum, next));
-        setPdfSplitRatio(textLeft ? clamped : 1 - clamped, capturePdfReadingAnchor());
-        localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
-    });
     const rememberPdfReadingAnchor = () => {
-        if (currentBookType === 'pdf' && !pdfSplitDrag) pdfReadingAnchor = capturePdfReadingAnchor();
+        if (currentBookType === 'pdf' && !pdfLayoutView.isDragging) pdfReadingAnchor = capturePdfReadingAnchor();
     };
     window.addEventListener('scroll', rememberPdfReadingAnchor, {passive: true});
     bookViewport.addEventListener('scroll', rememberPdfReadingAnchor, {passive: true});
@@ -2023,7 +1774,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const state = pdfPageStates.get(section);
         if (!state) return;
         state.abort?.abort();
-        state.viewer?.destroy();
+        pdfLayoutView.dispose(section, state);
         pdfPageStates.delete(section);
     }
 
@@ -2033,7 +1784,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function mountPdfPage(section) {
         pdfPageStates.set(section, {viewer: null, abort: null});
-        applyPdfLayout();
+        pdfLayoutView.apply();
         void hydratePdfPage(section);
     }
 
@@ -2119,7 +1870,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 (metadata.length ? ' · ' + metadata.join(' · ') : '') +
                 (qualityLimits.length ? ` · ${qualityLimits.length} bölgede matematik eşleşmesi belirsiz; kaynakla karşılaştırın.` :
                     result.source === 'ocr' ? ' · Tanıma hataları olabilir; kaynakla karşılaştırın.' : '');
-            if (!isNavigatingPage && !pdfSplitDrag) restorePdfReadingAnchor(anchor);
+            if (!isNavigatingPage && !pdfLayoutView.isDragging) restorePdfReadingAnchor(anchor);
         } catch (error) {
             if (signal.aborted || token !== session || !section.isConnected) return;
             console.error('PDF metni hazırlanamadı:', error);
@@ -2135,14 +1886,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function createPdfPageSection(pageNumber) {
-        const section = document.createElement('section');
-        section.id = 'pdf-page-' + pageNumber;
-        section.className = 'pdf-page';
-        section.dataset.pageIndex = pageNumber;
-        section.dataset.index = pageNumber - 1;
-        section.dataset.loaded = 'true';
-        section.setAttribute('role', 'region');
-        section.setAttribute('aria-label', 'Sayfa ' + pageNumber);
         const tools = document.createElement('div');
         tools.className = 'pdf-page-tools';
         const status = document.createElement('span');
@@ -2155,33 +1898,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         button.dataset.pdfOcr = pageNumber;
         button.textContent = 'Bu sayfayı OCR yap / yeniden üret';
         tools.append(status, button);
-        const text = document.createElement('div');
-        text.className = 'pdf-page-text';
-        text.id = 'pdf-text-' + pageNumber;
-        text.setAttribute('aria-label', 'Çıkarılan metin');
-        text.setAttribute('role', 'region');
-        const comparison = document.createElement('div');
-        comparison.className = 'pdf-page-comparison';
-        const columns = document.createElement('div');
-        columns.className = 'pdf-page-columns';
-        const imageColumn = document.createElement('div');
-        imageColumn.className = 'pdf-page-image-column';
-        const splitter = document.createElement('div');
-        splitter.className = 'pdf-splitter';
-        splitter.tabIndex = 0;
-        splitter.setAttribute('role', 'separator');
-        splitter.setAttribute('aria-orientation', 'vertical');
-        splitter.setAttribute('aria-label', 'PDF ve metin sütunu genişlikleri');
-        splitter.setAttribute('aria-controls', text.id);
-        columns.append(imageColumn, splitter, text);
-        comparison.appendChild(columns);
-        section.append(tools, comparison);
-        return section;
+        return createPdfPage(pageNumber, tools);
     }
 
     function makePdfPageText(result, assetToken) {
-        const text = document.createElement('div');
-        for (const block of result.blocks) {
+        const text = result.source === 'native'
+            ? renderNativePdfBlocks(result.blocks) : document.createElement('div');
+        if (result.source !== 'native') for (const block of result.blocks) {
             if (block.type === 'image') {
                 const figure = document.createElement('figure');
                 figure.className = 'pdf-figure';
@@ -2218,12 +1941,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 const span = document.createElement('span');
                 span.style.fontSize = run.fontScale + 'em';
-                if (result.source === 'native') {
-                    if (run.fontFamily) span.style.fontFamily = run.fontFamily;
-                    if (run.fontStyle) span.style.fontStyle = run.fontStyle;
-                    if (run.fontWeight) span.style.fontWeight = run.fontWeight;
-                    if (run.fontName) span.dataset.sourceFont = run.fontName;
-                }
                 span.textContent = run.text;
                 p.appendChild(span);
             }
@@ -2586,6 +2303,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (auth && onAuthStateChanged) {
         onAuthStateChanged(auth, async (user) => {
+            if (currentUser && currentUser.uid !== user?.uid) uploadQueue.cancelOwner(currentUser.uid);
             if (user) {
                 currentUser = user;
                 if (authModal) authModal.style.display = 'none';
