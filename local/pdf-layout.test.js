@@ -193,3 +193,21 @@ test('mixed cached layouts exclude equations and figures from speech text and re
     assert.equal(validBlocks([{ ...blocks[2], width: 0 }], ''), false);
     assert.equal(validBlocks([{ ...blocks[0], type: undefined }], blocks[0].text), false);
 });
+
+test('native illustrations split paragraphs, retain column order and do not repeat source labels', () => {
+    const figure = { type: 'image', kind: 'figure', imageUrl: '/uploads/pdf/book_1/page-1-v15-native-region-1.png',
+        width: 100, height: 20, bbox: { x0: 20, y0: 115, x1: 120, y1: 135 }, alt: 'Source chart' };
+    const blocks = nativeBlocks({ items: [
+        item('Left column before', 20, 800, 10, 100),
+        item('Chart label', 25, 775, 7, 40),
+        item('Left column after', 20, 750, 10, 100),
+        item('Right column before', 200, 800, 10, 100),
+        item('Right column after', 200, 787, 10, 100)
+    ] }, viewport, [], [figure]);
+    assert.deepEqual(blocks.map(block => block.type === 'image' ? block.alt : block.text),
+        ['Left column before', 'Source chart', 'Left column after', 'Right column before Right column after']);
+    assert.equal(blocksText(blocks), 'Left column before\n\nLeft column after\n\nRight column before Right column after');
+    assert.equal(validBlocks(blocks, blocksText(blocks)), true);
+    assert.equal(blocks[2].runs[0].fontScale, 1);
+    assert.deepEqual(nativeBlocks({ items: [] }, viewport, [], [figure]), [figure]);
+});

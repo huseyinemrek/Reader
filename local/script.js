@@ -1904,7 +1904,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function makePdfPageText(result, assetToken) {
         const text = result.source === 'native'
-            ? renderNativePdfBlocks(result.blocks, document, {onNavigate: page => goToPage(page)}) : document.createElement('div');
+            ? renderNativePdfBlocks(result.blocks, document, {
+                onNavigate: page => goToPage(page),
+                assetUrl: url => authenticatedAsset(url, assetToken)
+            }) : document.createElement('div');
         if (result.source !== 'native') for (const block of result.blocks) {
             if (block.type === 'image') {
                 const figure = document.createElement('figure');

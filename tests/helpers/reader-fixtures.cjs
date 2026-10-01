@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createRequire } = require('node:module');
+const { deflateSync } = require('node:zlib');
 const root = path.resolve(__dirname, '../..');
 const requireLocal = createRequire(path.join(root, 'local/package.json'));
 const JSZip = require(path.join(root, 'local/libs/jszip.min.js'));
@@ -56,4 +57,54 @@ async function makeEpub(directory, title = 'Generated parity journey') {
     return { file, title, bytes, laterImage };
 }
 
-module.exports = { makeEpub };
+async function makePdfGraphics(directory) {
+    const title = 'Generated native PDF graphics';
+    const objects = [];
+    const add = value => { objects.push(Buffer.isBuffer(value) ? value : Buffer.from(value, 'ascii')); return objects.length; };
+    const stream = (dictionary, bytes) => Buffer.concat([
+        Buffer.from(`<< ${dictionary} /Length ${bytes.length} >>\nstream\n`, 'ascii'),
+        bytes, Buffer.from('\nendstream', 'ascii')
+    ]);
+    add('<< /Type /Catalog /Pages 2 0 R >>');
+    add('<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>');
+    const resources = '/Resources << /Font << /F1 5 0 R >> /XObject << /Figure 6 0 R >> >>';
+    add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 360 480] ${resources} /Contents 7 0 R >>`);
+    add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 360 480] ${resources} /Contents 8 0 R >>`);
+    add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+    const pixels = Buffer.alloc(16 * 16 * 3);
+    for (let y = 0; y < 16; y++) {
+        for (let x = 0; x < 16; x++) {
+            const offset = (y * 16 + x) * 3;
+            const color = x < 8 ? [232, 32, 32] : [32, 64, 232];
+            for (let channel = 0; channel < 3; channel++) pixels[offset + channel] = color[channel];
+        }
+    }
+    add(stream('/Type /XObject /Subtype /Image /Width 16 /Height 16 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode', deflateSync(pixels)));
+    add(stream('', Buffer.from([
+        'BT /F1 14 Tf 40 400 Td (Prose above the native figure.) Tj ET',
+        'q 160 0 0 100 60 270 cm /Figure Do Q',
+        'q 0.12549 0.78431 0.25098 rg 60 220 40 24 re f Q',
+        // The rotated raster extends beyond its explicit source clipping rectangle.
+        'q 160 210 60 40 re W n 0 80 -100 0 240 190 cm /Figure Do Q',
+        'BT /F1 14 Tf 40 160 Td (Prose below the native figure.) Tj ET'
+    ].join('\n'), 'ascii')));
+    add(stream('', Buffer.from('q 200 0 0 140 80 170 cm /Figure Do Q', 'ascii')));
+    const chunks = [Buffer.from('%PDF-1.7\n', 'ascii')];
+    const offsets = [0];
+    let length = chunks[0].length;
+    objects.forEach((object, index) => {
+        offsets.push(length);
+        const chunk = Buffer.concat([Buffer.from(`${index + 1} 0 obj\n`, 'ascii'), object, Buffer.from('\nendobj\n', 'ascii')]);
+        chunks.push(chunk);
+        length += chunk.length;
+    });
+    chunks.push(Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n` +
+        offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('') +
+        `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${length}\n%%EOF\n`, 'ascii'));
+    const bytes = Buffer.concat(chunks);
+    const file = path.join(directory, 'generated-native-pdf-graphics.pdf');
+    await fs.writeFile(file, bytes);
+    return { file, title, bytes };
+}
+
+module.exports = { makeEpub, makePdfGraphics };

@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
 const crypto = require('crypto');
-const { nativeBlocks, nativePdfLinks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
-const { nativeTextContent } = require('../hosting/public/pdf-fonts.mjs');
+const { nativeBlocks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
+const { extractNativePdfPage } = require('../hosting/public/pdf-graphics.mjs');
 const createDocumentOcr = require('./document-ocr');
 const { documentBlocks } = require('./document-blocks');
 const { createSourceWindowRenderer } = require('./pdf-windows');
@@ -52,6 +52,8 @@ function createPdfOcr(uploadsDirectory) {
     let shuttingDown = false;
     const inFlightPages = new Map();
     const bookGenerations = new Map();
+    const inFlightNativePages = new Map();
+    const nativeGenerations = new Map();
     const descriptors = new Map();
     const describing = new Map();
 
@@ -211,35 +213,59 @@ function createPdfOcr(uploadsDirectory) {
         }
     }
 
-    async function readNativePage({ bookId, pdfPath, page, expectedSourceVersion }) {
-        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
-        const fileStat = await getPdfStat(resolvedPdfPath);
+    async function readNativePage({ bookId, pdfPath, page, fileStat, isCurrent }) {
         const version = sourceVersion(fileStat);
-        if (expectedSourceVersion && version !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        const cacheDirectory = path.join(pdfCacheRoot, bookId);
+        const cached = await readCachedPage(cacheDirectory, bookId, page, fileStat, 'native');
+        if (!isCurrent()) throw makeError(409, 'The PDF book was deleted.');
+        if (cached) {
+            if (sourceVersion(await getPdfStat(pdfPath)) !== version) throw makeError(409, 'The PDF source changed.');
+            if (!isCurrent()) throw makeError(409, 'The PDF book was deleted.');
+            const { imagePath, ...result } = cached;
+            return result;
+        }
         const pdfjs = await loadPdfJs();
         const task = pdfjs.getDocument({
-            data: new Uint8Array(await fs.promises.readFile(resolvedPdfPath)),
+            data: new Uint8Array(await fs.promises.readFile(pdfPath)),
             standardFontDataUrl: STANDARD_FONT_DATA_URL, cMapUrl: CMAP_URL, cMapPacked: true,
             fontExtraProperties: true
         });
+        const stagingDirectory = path.join(cacheDirectory, `.work-native-${crypto.randomUUID()}`);
+        let canvas;
         try {
             const document = await task.promise;
             if (page > document.numPages) throw makeError(400, 'Invalid PDF page number.');
             const sourcePage = await document.getPage(page);
             const unit = sourcePage.getViewport({ scale: 1 });
             const viewport = sourcePage.getViewport({ scale: Math.min(BASE_RENDER_SCALE, MAX_RENDER_DIMENSION / Math.max(unit.width, unit.height)) });
-            const content = await nativeTextContent(sourcePage);
-            const links = await nativePdfLinks(sourcePage, document, viewport);
-            const blocks = nativeBlocks(content, viewport, links);
-            if (sourceVersion(await getPdfStat(resolvedPdfPath)) !== version) throw makeError(409, 'The PDF source changed.');
-            return {
+            const extracted = await extractNativePdfPage(sourcePage, document, {
+                OPS: pdfjs.OPS, viewport, createCanvas: requireFromHere('@napi-rs/canvas').createCanvas,
+                imageUrl: async (crop, index) => {
+                    if (!isCurrent()) throw makeError(409, 'The PDF book was deleted.');
+                    await fs.promises.mkdir(stagingDirectory, { recursive: true });
+                    const url = `${pageAssetPrefix(bookId, page, 'native')}-region-${index}.png`;
+                    await fs.promises.writeFile(path.join(stagingDirectory, path.basename(url)), crop.toBuffer('image/png'));
+                    return url;
+                }
+            });
+            canvas = extracted.canvas;
+            const blocks = extracted.blocks;
+            if (!validBlocks(blocks, blocksText(blocks))) throw makeError(422, 'The native PDF layout is invalid.');
+            if (!isCurrent()) throw makeError(409, 'The PDF book was deleted.');
+            if (sourceVersion(await getPdfStat(pdfPath)) !== version) throw makeError(409, 'The PDF source changed.');
+            await fs.promises.mkdir(cacheDirectory, { recursive: true });
+            return await writeCache(cacheDirectory, {
                 page, text: blocksText(blocks), blocks, source: 'native', confidence: null,
                 engine: 'pdfjs', device: 'cpu', modelRevision: requireFromHere('pdfjs-dist/package.json').version,
                 elapsedMs: 0, qualityLimits: [], metrics: {}, pipelineVersion: CACHE_VERSION,
-                width: Math.max(1, Math.ceil(viewport.width)), height: Math.max(1, Math.ceil(viewport.height))
-            };
+                width: Math.max(1, Math.ceil(viewport.width)), height: Math.max(1, Math.ceil(viewport.height)),
+                ...(canvas ? { imageUrl: pageImageUrl(bookId, page, 'native'), imageBuffer: canvas.toBuffer('image/png') } : {})
+            }, fileStat, { stagingDirectory, pdfPath, isCurrent });
         } finally {
-            await task.destroy();
+            if (canvas) { canvas.width = 0; canvas.height = 0; }
+            try { await task.destroy(); } finally {
+                await fs.promises.rm(stagingDirectory, { recursive: true, force: true });
+            }
         }
     }
 
@@ -253,33 +279,37 @@ function createPdfOcr(uploadsDirectory) {
         return result;
     }
 
-    function pageCacheStem(pageNumber) {
-        return `page-${pageNumber}-v${CACHE_VERSION}`;
+    function pageCacheStem(pageNumber, source = 'ocr') {
+        return `page-${pageNumber}-v${CACHE_VERSION}${source === 'native' ? '-native' : ''}`;
     }
 
-    function pageAssetPrefix(bookId, pageNumber) {
-        return `/uploads/pdf/${bookId}/${pageCacheStem(pageNumber)}`;
+    function pageAssetPrefix(bookId, pageNumber, source = 'ocr') {
+        return `/uploads/pdf/${bookId}/${pageCacheStem(pageNumber, source)}`;
     }
 
-    function pageImageUrl(bookId, pageNumber) {
-        return pageAssetPrefix(bookId, pageNumber) + '.png';
+    function pageImageUrl(bookId, pageNumber, source = 'ocr') {
+        return pageAssetPrefix(bookId, pageNumber, source) + '.png';
     }
 
-    async function readCachedPage(cacheDirectory, bookId, pageNumber, fileStat) {
-        const jsonPath = path.join(cacheDirectory, pageCacheStem(pageNumber) + '.json');
-        const imagePath = path.join(cacheDirectory, pageCacheStem(pageNumber) + '.png');
+    async function readCachedPage(cacheDirectory, bookId, pageNumber, fileStat, source = 'ocr') {
+        const jsonPath = path.join(cacheDirectory, pageCacheStem(pageNumber, source) + '.json');
+        const imagePath = path.join(cacheDirectory, pageCacheStem(pageNumber, source) + '.png');
         let cached;
         try {
             cached = JSON.parse(await fs.promises.readFile(jsonPath, 'utf8'));
-            const imageStat = await fs.promises.stat(imagePath);
-            if (!imageStat.isFile() || imageStat.size === 0 || cached.page !== pageNumber ||
-                cached.version !== CACHE_VERSION ||
+            const hasImage = source !== 'native' || cached.blocks?.some(block => block.type === 'image');
+            if (hasImage) {
+                const imageStat = await fs.promises.lstat(imagePath);
+                if (!imageStat.isFile() || imageStat.size === 0) return null;
+            }
+            if (cached.page !== pageNumber || cached.version !== CACHE_VERSION ||
+                (source === 'native' && cached.sourceVersion !== sourceVersion(fileStat)) ||
                 cached.pdfSize !== fileStat.size || cached.pdfMtimeMs !== fileStat.mtimeMs ||
-                typeof cached.text !== 'string' || !validBlocks(cached.blocks, cached.text) || !['native', 'ocr'].includes(cached.source) ||
+                typeof cached.text !== 'string' || !validBlocks(cached.blocks, cached.text) || cached.source !== source ||
                 (cached.confidence !== null && !Number.isFinite(cached.confidence)) ||
                 !Number.isInteger(cached.width) || cached.width < 1 ||
                 !Number.isInteger(cached.height) || cached.height < 1 ||
-                cached.imageUrl !== pageImageUrl(bookId, pageNumber) ||
+                (hasImage ? cached.imageUrl !== pageImageUrl(bookId, pageNumber, source) : cached.imageUrl !== undefined) ||
                 typeof cached.engine !== 'string' || typeof cached.device !== 'string' ||
                 typeof cached.modelRevision !== 'string' ||
                 !Array.isArray(cached.qualityLimits) || !cached.qualityLimits.every(limit => typeof limit === 'string')) {
@@ -288,7 +318,7 @@ function createPdfOcr(uploadsDirectory) {
             for (const block of cached.blocks) {
                 if (block.bbox.x1 > cached.width || block.bbox.y1 > cached.height) return null;
                 if (block.type !== 'image') continue;
-                const expectedPrefix = pageAssetPrefix(bookId, pageNumber) + '-region-';
+                const expectedPrefix = pageAssetPrefix(bookId, pageNumber, source) + '-region-';
                 if (!block.imageUrl.startsWith(expectedPrefix) ||
                     block.width !== block.bbox.x1 - block.bbox.x0 ||
                     block.height !== block.bbox.y1 - block.bbox.y0) return null;
@@ -322,9 +352,9 @@ function createPdfOcr(uploadsDirectory) {
     }
 
     async function writeCache(cacheDirectory, pageResult, fileStat, { stagingDirectory, pdfPath, isCurrent = () => true } = {}) {
-        const imagePath = path.join(cacheDirectory, pageCacheStem(pageResult.page) + '.png');
-        const jsonPath = path.join(cacheDirectory, pageCacheStem(pageResult.page) + '.json');
-        const suffix = `${process.pid}-${Date.now()}`;
+        const imagePath = path.join(cacheDirectory, pageCacheStem(pageResult.page, pageResult.source) + '.png');
+        const jsonPath = path.join(cacheDirectory, pageCacheStem(pageResult.page, pageResult.source) + '.json');
+        const suffix = `${process.pid}-${crypto.randomUUID()}`;
         const temporaryImagePath = `${imagePath}.${suffix}.tmp`;
         const temporaryJsonPath = `${jsonPath}.${suffix}.tmp`;
         const cacheRecord = {
@@ -343,16 +373,17 @@ function createPdfOcr(uploadsDirectory) {
             imageUrl: pageResult.imageUrl,
             width: pageResult.width,
             height: pageResult.height,
+            sourceVersion: sourceVersion(fileStat),
             pdfSize: fileStat.size,
             pdfMtimeMs: fileStat.mtimeMs
         };
         try {
-            await fs.promises.writeFile(temporaryImagePath, pageResult.imageBuffer);
+            if (pageResult.imageBuffer) await fs.promises.writeFile(temporaryImagePath, pageResult.imageBuffer);
             await fs.promises.writeFile(temporaryJsonPath, JSON.stringify(cacheRecord), 'utf8');
-            if (!isCurrent()) throw makeError(409, 'The OCR job was replaced or deleted.');
+            if (!isCurrent()) throw makeError(409, pageResult.source === 'native' ? 'The PDF book was deleted.' : 'The OCR job was replaced or deleted.');
             if (pdfPath) {
                 const latest = fs.lstatSync(pdfPath);
-                if (!latest.isFile() || sourceVersion(latest) !== sourceVersion(fileStat)) throw makeError(409, 'The PDF source changed during OCR.');
+                if (!latest.isFile() || sourceVersion(latest) !== sourceVersion(fileStat)) throw makeError(409, 'The PDF source changed during extraction.');
             }
             // Publish without yielding: an obsolete generation cannot overwrite a newer lease.
             if (stagingDirectory) {
@@ -363,7 +394,7 @@ function createPdfOcr(uploadsDirectory) {
                     }
                 }
             }
-            fs.renameSync(temporaryImagePath, imagePath);
+            if (pageResult.imageBuffer) fs.renameSync(temporaryImagePath, imagePath);
             fs.renameSync(temporaryJsonPath, jsonPath);
         } finally {
             await Promise.all([
@@ -545,8 +576,25 @@ function createPdfOcr(uploadsDirectory) {
         if (nativeOnly === undefined) {
             nativeOnly = !forceOcr && (await describePdf({ bookId, pdfPath })).textLayer === 'native';
         }
-        // Native extraction has no raster/model/cache dependency and never joins queued OCR.
-        if (nativeOnly) return readNativePage({ bookId, pdfPath, page, expectedSourceVersion });
+        // Native work has its own assets and lifetime; OCR preferences cannot replace it.
+        if (nativeOnly) {
+            const nativeGeneration = nativeGenerations.get(bookId) || 0;
+            const nativeCurrent = () => (nativeGenerations.get(bookId) || 0) === nativeGeneration;
+            const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+            const fileStat = await getPdfStat(resolvedPdfPath);
+            if (expectedSourceVersion && sourceVersion(fileStat) !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+            if (!nativeCurrent()) throw makeError(409, 'The PDF book was deleted.');
+            const key = `${bookId}:${page}:${sourceVersion(fileStat)}:${nativeGeneration}`;
+            const existing = inFlightNativePages.get(key);
+            if (existing) return existing.promise;
+            const entry = { promise: readNativePage({ bookId, pdfPath: resolvedPdfPath, page, fileStat, isCurrent: nativeCurrent }) };
+            inFlightNativePages.set(key, entry);
+            const clear = () => {
+                if (inFlightNativePages.get(key) === entry) inFlightNativePages.delete(key);
+            };
+            entry.promise.then(clear, clear);
+            return entry.promise;
+        }
         const localGeneration = bookGenerations.get(bookId) || 0;
         const current = () => (bookGenerations.get(bookId) || 0) === localGeneration && isCurrent();
         const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
@@ -587,12 +635,16 @@ function createPdfOcr(uploadsDirectory) {
             return Promise.reject(makeError(400, 'Invalid book identifier.'));
         }
         cancelBookOcr(bookId);
+        nativeGenerations.set(bookId, (nativeGenerations.get(bookId) || 0) + 1);
         descriptors.delete(bookId);
         const cacheDirectory = path.join(pdfCacheRoot, bookId);
-        if (!waitForJobs) return fs.promises.rm(cacheDirectory, { recursive: true, force: true });
         const pagePrefix = `${bookId}:`;
+        if (!waitForJobs) {
+            const pendingNative = [...inFlightNativePages].filter(([key]) => key.startsWith(pagePrefix)).map(([, entry]) => entry.promise);
+            return Promise.allSettled(pendingNative).then(() => fs.promises.rm(cacheDirectory, { recursive: true, force: true }));
+        }
         const pendingPages = [];
-        for (const [key, entry] of inFlightPages) {
+        for (const [key, entry] of [...inFlightPages, ...inFlightNativePages]) {
             if (key.startsWith(pagePrefix)) {
                 pendingPages.push(entry.promise);
             }
@@ -604,7 +656,7 @@ function createPdfOcr(uploadsDirectory) {
     async function shutdown() {
         shuttingDown = true;
         await documentOcr.shutdown();
-        const pendingPages = Array.from(inFlightPages.values(), entry => entry.promise);
+        const pendingPages = [...inFlightPages.values(), ...inFlightNativePages.values()].map(entry => entry.promise);
         await Promise.allSettled(pendingPages);
         await jobQueue;
     }

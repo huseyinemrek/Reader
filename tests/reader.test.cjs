@@ -12,7 +12,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
-const { makeEpub } = require('./helpers/reader-fixtures.cjs');
+const { makeEpub, makePdfGraphics } = require('./helpers/reader-fixtures.cjs');
 const { startHosting, configureHosting, seedHosting, hostingLibrary } = require('./helpers/reader-hosting.cjs');
 const root = path.resolve(__dirname, '..');
 const requireLocal = createRequire(path.join(root, 'local/package.json'));
@@ -20,17 +20,20 @@ const { createCanvas, loadImage } = requireLocal('@napi-rs/canvas');
 let browser;
 let fixtureDirectory;
 let epubFixture;
+let pdfGraphicsFixture;
 let uploadFixtures;
 
 before(async () => {
     fixtureDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-generated-fixtures-'));
     epubFixture = await makeEpub(fixtureDirectory);
+    pdfGraphicsFixture = await makePdfGraphics(fixtureDirectory);
     uploadFixtures = await Promise.all([
         makeEpub(fixtureDirectory, 'First background journey'),
         makeEpub(fixtureDirectory, 'Second background journey')
     ]);
     const { default: puppeteer } = await import(pathToFileURL(requireLocal.resolve('puppeteer')).href);
-    browser = await puppeteer.launch({ headless: true });
+    // Cold navigations must release old emulator RPCs, not freeze them in BFCache.
+    browser = await puppeteer.launch({ headless: true, args: ['--disable-features=BackForwardCache'] });
 });
 after(async () => {
     try { await browser?.close(); }
@@ -79,6 +82,10 @@ async function startReader(mode, t) {
     await fs.copyFile(epubFixture.file, path.join(data, 'uploads', epubName));
     books.push({ id: 'book_test_epub', title: epubFixture.title, fileName: epubName,
         userId: 'local_user', bookUrl: '/uploads/' + epubName, coverUrl: null, toc: [] });
+    const graphicsName = 'book_test_pdf_graphics_generated.pdf';
+    await fs.copyFile(pdfGraphicsFixture.file, path.join(data, 'uploads', graphicsName));
+    books.push({ id: 'book_test_pdf_graphics', title: pdfGraphicsFixture.title, fileName: graphicsName,
+        userId: 'local_user', bookUrl: '/uploads/' + graphicsName, coverUrl: null, ocrMode: 'off', toc: [] });
     await fs.writeFile(path.join(data, 'library.json'), JSON.stringify(books));
     const port = await availablePort();
     const base = `http://127.0.0.1:${port}`;
@@ -210,6 +217,65 @@ async function visibleIllustration(page, name, rgb) {
     assert.deepEqual(pixel, [...rgb, 255], 'The visible illustration must contain real source pixels, not a dimension placeholder');
 }
 
+function nativeGraphicsPixels() {
+    const section = document.querySelector('.pdf-page');
+    const images = Array.from(section?.querySelectorAll('.pdf-page-text img') || []);
+    if (!images.length || images.some(image => !image.complete || !image.naturalWidth)) return null;
+    const palette = [[232, 32, 32], [32, 64, 232], [32, 200, 64]];
+    const figures = images.map(image => {
+        const canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(image, 0, 0);
+        const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        const colors = palette.map(() => ({ count: 0, x: 0, y: 0 }));
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+            const color = palette.findIndex(rgb => rgb.every((channel, index) =>
+                Math.abs(channel - pixels[offset + index]) <= 3) && pixels[offset + 3] === 255);
+            if (color < 0) continue;
+            colors[color].count++;
+            colors[color].x += (offset / 4) % canvas.width;
+            colors[color].y += Math.floor(offset / 4 / canvas.width);
+        }
+        for (const color of colors) {
+            color.x /= color.count || 1;
+            color.y /= color.count || 1;
+        }
+        const box = image.getBoundingClientRect();
+        const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+        return { colors, top: box.top, bottom: box.bottom, width: box.width, height: box.height,
+            visible: box.width > 0 && box.height > 0 && box.left < viewport.right && box.right > viewport.left &&
+                box.top < viewport.bottom && box.bottom > viewport.top };
+    });
+    if (!figures.some(figure => figure.visible && figure.colors[0].count > 20 && figure.colors[1].count > 20)) return null;
+    const paragraphs = Array.from(section.querySelectorAll('.pdf-text-block'));
+    const above = paragraphs.find(element => element.textContent.includes('Prose above'));
+    const below = paragraphs.find(element => element.textContent.includes('Prose below'));
+    return { page: Number(section.dataset.pageIndex), figures,
+        aboveBottom: above?.getBoundingClientRect().bottom ?? null,
+        belowTop: below?.getBoundingClientRect().top ?? null };
+}
+
+async function observeNativeGraphics(page, number, prose = false) {
+    await page.waitForFunction(nativeGraphicsPixels, { timeout: 30000 });
+    const result = await page.evaluate(nativeGraphicsPixels);
+    assert.equal(result.page, number, 'Reading must remain on the requested source page');
+    if (prose) {
+        assert.notEqual(result.aboveBottom, null);
+        assert.notEqual(result.belowTop, null);
+        assert.ok(result.figures.every(figure => figure.top >= result.aboveBottom - 1 &&
+            figure.bottom <= result.belowTop + 1), 'Source figures must stay between the prose above and below');
+        assert.ok(result.figures.some(figure => figure.colors[2].count > 20),
+            'The native reader must preserve the separate green vector graphic');
+        assert.ok(result.figures.some(({ colors }) => colors[0].count > 20 && colors[1].count > 20 &&
+            colors[0].x < colors[1].x - 5), 'The main raster must preserve its red-left, blue-right source orientation');
+        assert.ok(result.figures.some(({ colors }) => colors[0].count > 20 && colors[1].count > 20 &&
+            Math.abs(colors[0].y - colors[1].y) > 5), 'The clipped raster must preserve its source rotation');
+    }
+    return result.figures.map(figure => figure.colors.map(color => color.count));
+}
+
 async function readLibrary(page, base, mode) {
     if (mode === 'hosting') return hostingLibrary(page);
     const response = await fetch(base + '/api/books');
@@ -248,7 +314,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 }));
             }
         });
-        if (runtime) await seedHosting(page, runtime, epubFixture);
+        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture);
 
         await t.test('mixed faces preserve word-level emphasis and relative sizes', async () => {
             await openPdf(page, base);
@@ -359,6 +425,62 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await openPdf(page, base, 'book_test_no_outline', 1);
             await openSidebar(page, 'toc');
             assert.equal(await page.$$eval('#toc-list a', links => links.length), 0);
+        });
+
+        await t.test('native PDF illustrations preserve source pixels, order and image-only pages without OCR', async () => {
+            await page.setViewport({ width: 1400, height: 960 });
+            await openPdf(page, base);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-only');
+            await page.$eval('#font-size-slider', element => {
+                element.value = '20'; element.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            await page.click('#settings-close');
+            await page.goto(`${base}/book/book_test_pdf_graphics?page=1`, { waitUntil: 'domcontentloaded' });
+            await waitForPages(page);
+            assert.equal(await page.$('.pdf-original-viewport'), null);
+            const originalFigures = await observeNativeGraphics(page, 1, true);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-right');
+            await page.click('#settings-close');
+            await page.waitForFunction(() => {
+                const colors = [[232, 32, 32], [32, 64, 232], [32, 200, 64]];
+                const found = colors.map(() => false);
+                for (const canvas of document.querySelectorAll('.pdf-original-surface canvas')) {
+                    if (!canvas.width || !canvas.height) continue;
+                    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+                    for (let offset = 0; offset < pixels.length; offset += 4) {
+                        colors.forEach((rgb, index) => {
+                            if (rgb.every((channel, channelIndex) =>
+                                Math.abs(channel - pixels[offset + channelIndex]) <= 3) && pixels[offset + 3] === 255) found[index] = true;
+                        });
+                        if (found.every(Boolean)) return true;
+                    }
+                }
+                return false;
+            }, { timeout: 20000 });
+            assert.deepEqual(await observeNativeGraphics(page, 1, true), originalFigures,
+                'Opening source comparison must neither duplicate nor alter the extracted illustrations');
+            assert.equal(Number(new URL(page.url()).searchParams.get('page')), 1);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-only');
+            await page.click('#settings-close');
+            await page.waitForFunction(() => !document.querySelector('.pdf-original-viewport'));
+            assert.deepEqual(await observeNativeGraphics(page, 1, true), originalFigures);
+            await jumpTo(page, 2);
+            const imageOnlyFigures = await observeNativeGraphics(page, 2);
+            assert.equal(await page.$('.pdf-original-viewport'), null,
+                'An image-only source page must work in native reading without the source viewer or OCR');
+            await page.hover('#reader-nav-hit-area');
+            await page.waitForFunction(() => getComputedStyle(document.getElementById('reader-nav')).visibility === 'visible');
+            await page.click('#back-to-library');
+            await page.waitForFunction(() => getComputedStyle(document.getElementById('reader-view')).display === 'none');
+            await waitForLibrary(page, base, mode, books =>
+                Number(books.find(book => book.id === 'book_test_pdf_graphics')?.readerPosition?.globalPage) === 2);
+            await page.goto(`${base}/book/book_test_pdf_graphics`, { waitUntil: 'domcontentloaded' });
+            await waitForPages(page);
+            assert.deepEqual(await observeNativeGraphics(page, 2), imageOnlyFigures,
+                'Reopening must restore the nonblank image-only source page');
         });
 
         await t.test('layout bundle paginates source text without the archive or later illustration', async () => {

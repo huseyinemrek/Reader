@@ -82,6 +82,8 @@ PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Orijinal sayfa tarayıcıda P
 
 Yerleşik PDF metninde italik/oblik, font ağırlığı ve göreli boyut farkları metin parçalarıyla korunur. Kullanıcının seçtiği font, renk ve temel boyut override’ları geçerli kalır; kaynak vurgu bu seçilmiş stilin üzerine uygulanır, kaynak font zorla dayatılmaz. Font bilgisi bulunmayan taranmış/vektör gövdeli OCR çıktısında italik veya font adı tahmin edilmez.
 
+PDF içindeki resimler ve vektör çizimler OCR’den bağımsız olarak kaynak sayfadan kırpılır; **Yalnız metin** düzeninde de metin arasındaki kaynak konumlarına yerleştirilir. Döndürme, clipping ve maskeler PDF.js çizimiyle korunur; kapak/görsel sayfası boş metin uyarısıyla değiştirilmez. Kırpım içinde zaten görünen etiketler metinde ikinci kez yazılmaz. Local/VPS bu sonucu kaynak dosyası değişince geçersizleşen ayrı `-native` PNG/JSON önbelleğinde tutar; OCR sonucu ve tercihiyle karışmaz. Mevcut kitapları yeniden yüklemek gerekmez.
+
 **İçindekiler** PDF’nin yer işaretlerinden doğrudan yüklenir; alt başlıklar ve adlandırılmış/sayfa referanslı hedefler korunur. Bağlantı doğru PDF sayfasına gider. Kaynak PDF’de yer işareti kaydı yoksa bu açıkça belirtilir; uydurma bölüm listesi üretilmez.
 
 PDF türü kapaktan değil **kitap düzeyinde** belirlenir: boş/görsel başlangıç sayfalarından sonra gelen metin de incelenir. Yerleşik paragraf, kısa cümle veya grafik çizimleri içermeyen kısa dijital metin bulunduğunda kitap yerleşik metinle okunur. Vektör çizimine dönüşmüş gövde ve yalnız grafik etiketleri OCR gerektirir. Sınıflandırma PDF kaynağına ve sınıflandırıcı sürümüne bağlı önbelleğe alınır; model yüklemez veya sayfa rasterleştirmez.
@@ -90,7 +92,7 @@ PDF türü kapaktan değil **kitap düzeyinde** belirlenir: boş/görsel başlan
 
 - **Otomatik:** Yerleşik metinli kitapta OCR çalışmaz; boş kapak olduğu gibi gösterilir. Taranmış/vektör gövdeli kitapta ziyaret edilen sayfalar OCR kullanır.
 - **Açık:** Yerleşik metin bulunsa bile ziyaret edilen sayfalar OCR kullanır.
-- **Kapalı:** Yalnız PDF’nin kendi metni gösterilir; hazır OCR önbelleği de bu tercihi geçersiz kılamaz. Bekleyen/işlenen OCR nesilleri iptal edilir.
+- **Kapalı:** PDF’nin kendi metni ve kaynak görselleri gösterilir; hazır OCR önbelleği de bu tercihi geçersiz kılamaz. Bekleyen/işlenen OCR nesilleri iptal edilir.
 
 **Geçerli sayfayı OCR yap / yeniden üret** veya sayfadaki aynı düğme, **Kapalı** seçiliyken bile yalnız o sayfa için açık istek gönderir; kitap tercihini değiştirmez. Sayfa yeniden açıldığında kitap tercihi yeniden geçerlidir. Karma kitapların görsel sayfalarında da bu düğmeyi kullanabilirsiniz. Yerel **Açık** tüm ziyaret edilen sayfaları yerel motorla işler; VPS’de tüm kitap/sayfa aralığı hazırlama ayrıca ayarlardaki panelden yapılır.
 

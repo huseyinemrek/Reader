@@ -8,18 +8,20 @@ const path = require('path');
 const net = require('net');
 const { spawn } = require('child_process');
 const { once } = require('events');
-const { createCanvas } = require('@napi-rs/canvas');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 // Native-only policy must work without installing or starting a recognition model.
 process.env.OCR_PYTHON = path.join(os.tmpdir(), `reader-policy-no-python-${require('crypto').randomUUID()}`);
 const createPdfOcr = require('./pdf-ocr');
 const createOcrQueue = require('./ocr-queue');
 const { nativeFontStyle } = require('../hosting/public/pdf-fonts.mjs');
+const { validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 
 function textStream(text, y = 170) {
     return `BT /F1 5 Tf 12 ${y} Td (${text.replace(/[\\()]/g, '\\$&')}) Tj ET`;
 }
 const body = 'This short digital document contains searchable native prose.';
 const imageStream = 'q 200 0 0 200 0 0 cm BI /W 1 /H 1 /CS /RGB /BPC 8 /F /AHx ID 000000> EI Q';
+const colorImageStream = 'q 80 0 0 40 40 80 cm BI /W 2 /H 1 /CS /RGB /BPC 8 /I false /F /AHx ID FF00000000FF> EI Q';
 const graphStream = '0 0 0 rg 20 20 2 100 re f 20 20 150 2 re f\n' +
     textStream('Average reward', 180) + '\n' + textStream('Time steps', 40) + '\n' + textStream('x y Q 0 1 2', 100);
 
@@ -87,6 +89,114 @@ function workerPage(width, height, content) {
     return { image, result: { width, height, engine: 'fixture-worker', device: 'cpu', modelRevision: 'isolated',
         elapsedMs: 1, qualityLimits: [], regions: [{ kind: 'text', bbox: { x0: 10, y0: 10, x1: width - 10, y1: 100 }, content }] } };
 }
+
+async function pixels(uploads, url) {
+    const image = await loadImage(fs.readFileSync(path.join(uploads, url.slice('/uploads/'.length))));
+    const canvas = createCanvas(image.width, image.height);
+    try {
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0);
+        return { width: canvas.width, height: canvas.height,
+            data: context.getImageData(0, 0, canvas.width, canvas.height).data };
+    } finally {
+        canvas.width = 0; canvas.height = 0;
+    }
+}
+
+function pixel(image, x, y) {
+    const offset = (y * image.width + x) * 4;
+    return Array.from(image.data.slice(offset, offset + 4));
+}
+
+test('native mixed and image-only pages retain raster pixels and source reading order without OCR', async t => {
+    const { uploads, add, cleanup } = fixture(t);
+    const service = createPdfOcr(uploads);
+    cleanup.push(() => service.shutdown());
+    const below = 'The paragraph follows the source illustration.';
+    const source = add('native_figures', [
+        `${textStream(body)}\n${colorImageStream}\n${textStream(below, 40)}`,
+        colorImageStream
+    ]);
+    const descriptor = await service.describePdf(source);
+    assert.equal(descriptor.textLayer, 'native');
+    const mixed = await service.getPdfPage({ ...source, page: 1 });
+    assert.equal(mixed.source, 'native');
+    assert.equal(mixed.text, `${body}\n\n${below}`);
+    assert.deepEqual(mixed.blocks.map(block => block.type), ['text', 'image', 'text']);
+    assert.equal(mixed.blocks[0].text, body);
+    assert.equal(mixed.blocks[2].text, below);
+    const figure = mixed.blocks[1];
+    assert.equal(validBlocks(mixed.blocks, mixed.text), true);
+    assert.equal(figure.kind, 'figure');
+    // Conservative upper bounds include both the rounded-up cell and its end.
+    for (const [coordinate, expected] of Object.entries({ x0: 100, y0: 200, x1: 300, y1: 300 })) {
+        const dimension = coordinate.startsWith('x') ? mixed.width : mixed.height;
+        const quantization = Math.ceil(dimension * (coordinate.endsWith('1') ? 2 : 1) / 256) + 1;
+        assert.ok(Math.abs(figure.bbox[coordinate] - expected) <= quantization,
+            `${coordinate}: ${figure.bbox[coordinate]} must stay within ${quantization}px of the source ${expected}`);
+    }
+    assert.ok(figure.bbox.x0 <= 100 && figure.bbox.y0 <= 200 && figure.bbox.x1 >= 300 && figure.bbox.y1 >= 300);
+    assert.equal(figure.width, figure.bbox.x1 - figure.bbox.x0);
+    assert.equal(figure.height, figure.bbox.y1 - figure.bbox.y0);
+    assert.ok(mixed.blocks[0].bbox.y1 < figure.bbox.y0);
+    assert.ok(figure.bbox.y1 < mixed.blocks[2].bbox.y0);
+    const crop = await pixels(uploads, figure.imageUrl);
+    assert.deepEqual(pixel(crop, 50, 50), [255, 0, 0, 255]);
+    assert.deepEqual(pixel(crop, 150, 50), [0, 0, 255, 255]);
+    const full = await pixels(uploads, mixed.imageUrl);
+    assert.deepEqual(pixel(full, 20, 250), [255, 255, 255, 255]);
+    assert.deepEqual(pixel(full, 150, 250), pixel(crop, 50, 50));
+    assert.deepEqual(pixel(full, 250, 250), pixel(crop, 150, 50));
+    const imageOnly = await service.getPdfPage({ ...source, page: 2 });
+    assert.equal(imageOnly.source, 'native');
+    assert.equal(imageOnly.text, '');
+    assert.equal(validBlocks(imageOnly.blocks, ''), true);
+    assert.deepEqual(imageOnly.blocks.map(block => block.type), ['image']);
+    const imageOnlyCrop = await pixels(uploads, imageOnly.blocks[0].imageUrl);
+    assert.deepEqual(pixel(imageOnlyCrop, 50, 50), [255, 0, 0, 255]);
+    assert.deepEqual(pixel(imageOnlyCrop, 150, 50), [0, 0, 255, 255]);
+    const reopened = createPdfOcr(uploads);
+    cleanup.push(() => reopened.shutdown());
+    assert.deepEqual((await reopened.getPdfPage({ ...source, page: 1, nativeOnly: true })).blocks, mixed.blocks);
+    const cropPath = path.join(uploads, figure.imageUrl.slice('/uploads/'.length));
+    fs.writeFileSync(cropPath, 'invalid PNG');
+    const repaired = await reopened.getPdfPage({ ...source, page: 1, nativeOnly: true });
+    assert.deepEqual(pixel(await pixels(uploads, repaired.blocks[1].imageUrl), 50, 50), [255, 0, 0, 255]);
+});
+
+test('native illustration cache stays independent of OCR output and invalidates when source pixels change', async t => {
+    const { uploads, add, cleanup } = fixture(t);
+    const source = add('separate_figures', [`${textStream(body)}\n${colorImageStream}`]);
+    const service = createPdfOcr(uploads);
+    cleanup.push(() => service.shutdown());
+    const descriptor = await service.describePdf({ ...source, page: 1 });
+    const native = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
+    const originalCrop = fs.readFileSync(path.join(uploads, native.blocks[1].imageUrl.slice('/uploads/'.length)));
+    const recognized = 'Recognized page selected only by OCR policy.';
+    await service.saveComputedPage({ ...source, page: 1, ...workerPage(descriptor.width, descriptor.height, recognized),
+        expectedSourceVersion: descriptor.sourceVersion, isCurrent: () => true });
+    service.cancelBookOcr(source.bookId);
+    const nativeAgain = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
+    assert.deepEqual(nativeAgain.blocks, native.blocks);
+    assert.deepEqual(fs.readFileSync(path.join(uploads, nativeAgain.blocks[1].imageUrl.slice('/uploads/'.length))), originalCrop);
+    const ocr = await service.getPdfPage({ ...source, page: 1, nativeOnly: false, forceOcr: true, regenerate: false });
+    assert.equal(ocr.source, 'ocr');
+    assert.equal(ocr.text, recognized);
+    assert.notEqual(ocr.imageUrl, native.imageUrl);
+    assert.equal((await service.getCachedPage({ ...source, page: 1 })).text, recognized);
+    fs.writeFileSync(source.pdfPath, pdf([`${textStream(body)}\n${colorImageStream.replace('FF00000000FF', '00FF00FFFF00')}`]));
+    const future = new Date(Date.now() + 2000);
+    fs.utimesSync(source.pdfPath, future, future);
+    await assert.rejects(service.getPdfPage({ ...source, page: 1, nativeOnly: true,
+        expectedSourceVersion: descriptor.sourceVersion }), error => error.statusCode === 409);
+    const updated = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
+    const updatedCrop = await pixels(uploads, updated.blocks[1].imageUrl);
+    assert.deepEqual(pixel(updatedCrop, 50, 50), [0, 255, 0, 255]);
+    assert.deepEqual(pixel(updatedCrop, 150, 50), [255, 255, 0, 255]);
+    assert.equal(await service.getCachedPage({ ...source, page: 1 }), null);
+    await service.deleteBookCache(source.bookId);
+    assert.equal(fs.existsSync(path.join(uploads, 'pdf', source.bookId)), false);
+});
 
 test('classification finds prose after long blank/image front matter, recognizes short prose and rejects graph glyphs', async t => {
     const { uploads, add, cleanup } = fixture(t);
@@ -213,7 +323,6 @@ test('native extraction ignores OCR cache and OCR-enabled reads reuse only recog
     const enabled = await service.getPdfPage({ ...source, page: 1, nativeOnly: false, forceOcr: true, regenerate: false });
     assert.equal(enabled.source, 'ocr');
     assert.equal(enabled.text, recognized);
-    assert.equal(enabled.pipelineVersion, 15);
     assert.equal((await service.getPdfPage({ ...source, page: 1 })).text, '');
     await assert.rejects(service.getPdfPage({ ...source, page: 1, forceOcr: true }),
         error => error.statusCode === 500);
@@ -259,13 +368,14 @@ async function startServer(directory, cleanup) {
             }
         });
     });
-    const request = async (route, { worker = false, body, ...options } = {}) => {
+    const request = async (route, { worker = false, binary = false, body, ...options } = {}) => {
         const response = await fetch(`http://127.0.0.1:${port}${route}`, {
             ...options, body: body === undefined ? undefined : JSON.stringify(body),
             headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
                 ...(worker ? { Authorization: `Bearer ${secret}` } : {}) }
         });
-        return { status: response.status, body: response.status === 204 ? null : await response.json() };
+        return { status: response.status, body: response.status === 204 ? null :
+            binary ? Buffer.from(await response.arrayBuffer()) : await response.json() };
     };
     return { request, stop };
 }
@@ -295,7 +405,20 @@ test('book preferences, explicit generations and cancellation control what reade
     assert.equal(lease.id, automatic.body.jobId);
     const off = await request(`${route(scanned.bookId)}/pdf/ocr`, { method: 'POST', body: { mode: 'off' } });
     assert.equal(off.body.automaticOcr, false);
-    assert.equal((await request(`${route(scanned.bookId)}/pdf/pages/1`)).body.source, 'native');
+    const noOcrPage = (await request(`${route(scanned.bookId)}/pdf/pages/1`)).body;
+    assert.equal(noOcrPage.source, 'native');
+    assert.deepEqual(noOcrPage.blocks.map(block => block.type), ['image']);
+    const servedFigure = await request(noOcrPage.blocks[0].imageUrl, { binary: true });
+    assert.equal(servedFigure.status, 200);
+    const decodedFigure = await loadImage(servedFigure.body);
+    const figureCanvas = createCanvas(decodedFigure.width, decodedFigure.height);
+    try {
+        const context = figureCanvas.getContext('2d');
+        context.drawImage(decodedFigure, 0, 0);
+        assert.deepEqual(Array.from(context.getImageData(250, 250, 1, 1).data), [0, 0, 0, 255]);
+    } finally {
+        figureCanvas.width = 0; figureCanvas.height = 0;
+    }
     assert.equal((await request(`${route(scanned.bookId)}/pdf/pages/1?ocrJob=${lease.id}`)).status, 410);
     assert.equal((await request(`/api/compute/jobs/${lease.id}/complete`, { worker: true, method: 'POST',
         body: { leaseToken: lease.leaseToken } })).status, 410);

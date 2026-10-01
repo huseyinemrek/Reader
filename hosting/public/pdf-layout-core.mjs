@@ -89,7 +89,7 @@ export async function nativePdfLinks(page, pdfDocument, viewport = page.getViewp
     return links;
 }
 
-export function nativeBlocks(content, viewport, links = []) {
+export function nativeBlocks(content, viewport, links = [], figures = []) {
     const lines = [];
     const matrix = viewport.transform;
     const point = (x, y) => ({ x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] });
@@ -136,12 +136,15 @@ export function nativeBlocks(content, viewport, links = []) {
         previousItem = item;
     }
     for (const line of lines) line.keepSeparate = line.textWeight > 0 && line.linkedWeight / line.textWeight >= 0.8;
-    return layoutBlocks(lines);
+    return layoutBlocks(lines, figures);
 }
 
-function layoutBlocks(lines) {
-    if (!lines.length) return [];
-    const reference = median(lines.flatMap(line => line.parts.map(part => ({ value: part.size, weight: weight(part.text) }))));
+function layoutBlocks(source, figures = []) {
+    const reference = median(source.flatMap(line => line.parts.map(part => ({ value: part.size, weight: weight(part.text) }))));
+    // The source crop already contains graphic labels and overlaid text.
+    const lines = figures.length ? source.filter(line => !figures.some(({ bbox }) =>
+        line.bbox.x0 >= bbox.x0 && line.bbox.x1 <= bbox.x1 &&
+        line.bbox.y0 >= bbox.y0 && line.bbox.y1 <= bbox.y1)) : source;
     const spacings = [];
     for (let i = 1; i < lines.length; i += 1) {
         const before = lines[i - 1];
@@ -167,7 +170,10 @@ function layoutBlocks(lines) {
             const overlap = Math.min(right, line.bbox.x1) - Math.max(left, line.bbox.x0);
             const indented = line.bbox.x0 - left > size * 0.8;
             const previousShort = previous.bbox.x1 - previous.bbox.x0 < width * 0.85;
-            merge = !previous.keepSeparate && !line.keepSeparate && distance > size * 0.5 && distance <= leading * size * 1.22 &&
+            const graphicBetween = figures.some(({ bbox }) => bbox.y1 > previous.bbox.y1 && bbox.y0 < line.bbox.y0 &&
+                bbox.x0 < Math.min(right, line.bbox.x1) && bbox.x1 > Math.max(left, line.bbox.x0));
+            merge = !graphicBetween && !previous.keepSeparate && !line.keepSeparate &&
+                distance > size * 0.5 && distance <= leading * size * 1.22 &&
                 Math.abs(line.size / previous.size - 1) < 0.25 && overlap > Math.min(width, line.bbox.x1 - line.bbox.x0) * 0.5 &&
                 !indented && !previousShort;
         }
@@ -175,7 +181,7 @@ function layoutBlocks(lines) {
         else groups.push([line]);
     }
     const vocabulary = new Set(lines.flatMap(line => clean(line.text).toLowerCase().match(/[\p{L}]+(?:-[\p{L}]+)*/gu) || []));
-    return groups.map(group => {
+    const blocks = groups.map(group => {
         const runs = [];
         let bbox = group[0].bbox;
         const append = (text, size, typography, link) => {
@@ -220,6 +226,18 @@ function layoutBlocks(lines) {
         sourceLines.set(block, { lines: group, reference });
         return block;
     });
+    // Keep PDF text extraction's column order; insert each crop beside text
+    // from its own column rather than sorting all paragraphs by vertical position.
+    for (const figure of [...figures].sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0)) {
+        const sameColumn = block => Math.min(block.bbox.x1, figure.bbox.x1) > Math.max(block.bbox.x0, figure.bbox.x0);
+        let index = blocks.findIndex(block => sameColumn(block) && block.bbox.y0 >= figure.bbox.y1);
+        if (index < 0) {
+            const previous = blocks.findLastIndex(block => sameColumn(block) && block.bbox.y0 < figure.bbox.y1);
+            index = previous >= 0 ? previous + 1 : blocks.findIndex(block => block.bbox.x0 >= figure.bbox.x1);
+        }
+        blocks.splice(index < 0 ? blocks.length : index, 0, figure);
+    }
+    return blocks;
 }
 
 export function blocksText(blocks) {
@@ -233,7 +251,7 @@ function validBbox(box) {
 
 function validImage(image) {
     return image.kind === 'figure' && typeof image.alt === 'string' &&
-        /^\/uploads\/pdf\/[A-Za-z0-9_-]{1,128}\/page-[1-9]\d*-v[1-9]\d*-region-[1-9]\d*\.png$/.test(image.imageUrl) &&
+        /^\/uploads\/pdf\/[A-Za-z0-9_-]{1,128}\/page-[1-9]\d*-v[1-9]\d*(?:-native)?-region-[1-9]\d*\.png$/.test(image.imageUrl) &&
         Number.isSafeInteger(image.width) && image.width > 0 &&
         Number.isSafeInteger(image.height) && image.height > 0 && validBbox(image.bbox);
 }

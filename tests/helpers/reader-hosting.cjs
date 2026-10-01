@@ -163,7 +163,7 @@ export { app,auth,db,storage };`;
     });
 }
 
-async function seedHosting(page, runtime, epub) {
+async function seedHosting(page, runtime, epub, pdfGraphics) {
     await page.goto(runtime.base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof JSZip === 'function');
     const fixtures = [];
@@ -171,6 +171,8 @@ async function seedHosting(page, runtime, epub) {
         fixtures.push({ id, name, bytes: (await fs.readFile(path.join(root, 'tests/fixtures', name))).toString('base64') });
     }
     fixtures.push({ id: 'book_test_epub', name: path.basename(epub.file), title: epub.title, bytes: epub.bytes.toString('base64') });
+    fixtures.push({ id: 'book_test_pdf_graphics', name: path.basename(pdfGraphics.file),
+        title: pdfGraphics.title, bytes: pdfGraphics.bytes.toString('base64') });
     await page.evaluate(async fixtures => {
         const { auth, db, storage } = await import('/firebase-config.js');
         const { createUserWithEmailAndPassword } = await import('https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js');
@@ -201,7 +203,9 @@ async function seedHosting(page, runtime, epub) {
         }
     }, fixtures);
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => document.querySelectorAll('.book-card').length === 3, { timeout: 30000 });
+    await page.waitForFunction(titles => titles.every(title => Array.from(document.querySelectorAll('.book-title'))
+        .some(element => element.textContent === title)), { timeout: 30000 },
+    fixtures.map(fixture => fixture.title || fixture.name));
 }
 
 async function hostingLibrary(page) {

@@ -235,6 +235,20 @@
     overflow-wrap: anywhere;
 }
 
+#book-content .pdf-figure {
+    margin: 1em 0;
+    max-width: 100%;
+}
+
+#book-content .pdf-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: none;
+    margin: 0;
+    border-radius: 0;
+}
+
 @media (max-width: 768px) {
     .pdf-page-comparison {
         overflow-x: auto;

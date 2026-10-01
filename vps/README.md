@@ -61,17 +61,19 @@ Hazır paket `DATA_DIR/layout-cache/<bookId>/<sourceVersion>/` altında saklanı
 
 Üç sürüm aynı PDF yer işareti/tipografi, üç PDF düzeni, döşemeli kaynak viewer ve ayırıcı davranışını kullanır. Kullanıcı font/renk/boyut seçimi EPUB’de de kaynak CSS’ye üstün gelir; italik/kalın/göreli boyutlar korunur. Okuyucunun üst menüsündeki `+` çoklu/tekrarlı dosya seçimini sekmelik kuyruğa ekler. Küçük yüzde dairesi gerçek kitap adını gösterir; kitap/sayfa değiştirmek ve ayar kullanmak yüklemeyi durdurmaz. Sekme kapanınca bekleyen dosyalar geri getirilmez; tamamlanmış kitaplar VPS’de kalır. Bekleyen işte tarayıcı kapatma/yenileme uyarısı verir; çıkış/hesap değişimi eski hesabın işlerini iptal eder.
 
+PDF resimleri ve vektör çizimleri OCR kapalıyken de kaynak koordinatlarına göre metin arasına yerleştirilir; yalnız görsel içeren sayfa boş kalmaz. Ortak çıkarıcı PDF.js’in kaynak çizimini kullanır; döndürme, clipping ve maskeler korunur. `uploads/pdf/<bookId>/page-N-v15-native*.png` ve ayrı native JSON önbelleği kaynak boyutu/zamanıyla doğrulanır; OCR cache’ini ezmez. Oluşturulan native görseller de kitap sahibinin kimlik doğrulamasıyla sunulur; kitapları yeniden yüklemek gerekmez.
+
 
 
 ## OCR modları ve kalıcı kuyruk
 
-- **Ayarlar → Bu kitap için OCR** varsayılanı **Otomatik**tir: kitap düzeyinde yerleşik metin bulunduysa boş kapakta bile OCR başlamaz; taranmış/vektör gövdeli kitapta açılan sayfa hazırlanır. **Açık** yerleşik metin yerine OCR ister; **Kapalı** hazır OCR cache yerine yalnız PDF metnini gösterir ve devam eden iş nesillerini iptal eder. Tercih `library.json` içindeki `ocrMode` alanında korunur.
+- **Ayarlar → Bu kitap için OCR** varsayılanı **Otomatik**tir: kitap düzeyinde yerleşik metin bulunduysa boş kapakta bile OCR başlamaz; taranmış/vektör gövdeli kitapta açılan sayfa hazırlanır. **Açık** yerleşik metin yerine OCR ister; **Kapalı** hazır OCR cache yerine PDF’nin kendi metnini ve kaynak görsellerini gösterir, devam eden OCR iş nesillerini iptal eder. Tercih `library.json` içindeki `ocrMode` alanında korunur.
 - **Ayarlar → OCR işleme ve dışarı çıkmadan kitap hazırlama** paneli **VPS** veya **Bilgisayarım / GPU worker** işlem yerini ve tüm kitap/sayfa aralığı/geçerli sayfa kapsamını seçtirir. Toplu gönderim açık bir OCR isteğidir ve kitap tercihini **Açık** yapar. VPS kendi CPU motoruyla aynı anda yalnızca bir iş çalıştırır; bilgisayar işleri CPU'ya hiçbir zaman düşmez ve işçi kapalıysa bekler.
 - **Geçerli sayfayı OCR yap / yeniden üret** düğmesi **Kapalı** durumda da yalnız o sayfayı hazırlar; kitap tercihini değiştirmez. Okuyucu dönen iş kimliğini izler, tamamlanınca sonucu gösterir. Sonraki normal açılış kitap tercihini kullanır.
 - İşlem yeri `library.json` içindeki `computeMode` alanında korunur. Aralığı yeniden göndermek veya OCR tercihini değiştirmek eski iş kimliğini/lease'ini iptal eder; geç gelen CPU/GPU sonucu yeni nesli ezemez. Yeniden başlatma öncesinden kalan otomatik işler güncel kitap sınıflandırmasıyla denetlenir; yerleşik metinli kitapta devam ettirilmez.
 - Önbellek 15. pipeline sürümünü, kaynak PDF boyutunu/zamanını ve boyutları doğrular. CPU ve bilgisayar sonuçları aynı `documentBlocks` normalizasyonunu ve sürümlü PNG/JSON önbelleğini kullanır. Figürler kaynak PNG kırpımlarıdır, model HTML'i çalıştırılmaz.
 - JSON kuyruk her durum değişiminde geçici dosya + rename ile kalıcı yazılır. Lease bitimi işleri tekrar beklemeye alır; VPS yeniden başlatılması yarım kalmış işleri geri alır. Kitap silme/kaynak değişikliği geç gelen sonuçları iptal eder. Aynı tamamlanmış lease'in tekrarlanan teslimi idempotenttir.
-- Sayfa API'si cache varsa 200, iş bekliyorsa/çalışıyorsa/hatalıysa 202 döner; PDF render veya model çıkarımını HTTP isteğinin içinde beklemez. Hatalı işi arayüzden yeniden gönderin; otomatik CPU geçişi yoktur.
+- OCR sayfa API’si cache varsa 200, iş bekliyorsa/çalışıyorsa/hatalıysa 202 döner; OCR için PDF render/model çıkarımını HTTP isteğinin içinde beklemez. Yerleşik metin/görsel yolunda ilk istek kaynak kırpımlarını hazırlar, sonraki istek ayrı native cache’i okur. Hatalı OCR işini arayüzden yeniden gönderin; otomatik CPU geçişi yoktur.
 
 ## HTTP sözleşmesi
 
@@ -83,7 +85,7 @@ Korumalı EPUB görsel/SVG/CSS arka plan/font URL’leri de mevcut kullanıcı `
 - `GET /api/books/:id/pdf` → `{totalPages,sourceVersion,textLayer:'native'|'scanned',ocrMode:'auto'|'on'|'off',automaticOcr}`.
 - `POST /api/books/:id/pdf/ocr` gövde `{mode:'auto'|'on'|'off'}` → güncel kitap tanımı; bekleyen/işlenen nesilleri iptal eder.
 - `GET /api/books/:id/layout` → hazırlanırken 202 `{status:'pending'|'processing',sourceVersion}`, hazırken 200 ZIP + `X-Reader-Source-Version`, hatalı arşivde 422 `{status:'failed',sourceVersion,error}`. Yalnız kitap sahibi başlatabilir/okuyabilir.
-- `GET /api/books/:id/pdf/pages/:page` → kitap tercihine göre sayfa sonucu veya 202 `{status,jobId,mode,error?}`. `?ocr=0` yalnız yerleşik metni; `?ocr=1` açık yeniden üretimi ister. `?ocrJob=<id>` yalnız bu neslin sonucunu izler; iptal edilen/değiştirilen nesil 410 döndürür.
+- `GET /api/books/:id/pdf/pages/:page` → kitap tercihine göre sayfa sonucu veya 202 `{status,jobId,mode,error?}`. `?ocr=0` yerleşik metni ve kaynak görsellerini; `?ocr=1` açık OCR yeniden üretimini ister. `?ocrJob=<id>` yalnız bu neslin sonucunu izler; iptal edilen/değiştirilen nesil 410 döndürür.
 - `GET /api/books/:id/compute` → `{mode,totalPages,counts:{pending,processing,completed,failed},jobs:[{id,page,status,mode,error?}]}`. Sayımlar kuyruktaki işlere aittir; önceden kuyruğa alınmamış disk cache sayfaları sayılmaz.
 - `POST /api/books/:id/compute` gövde `{mode:'vps'|'compute',fromPage?,toPage?}`; aralık verilmezse PDF'nin tamamı. Kitap OCR tercihini `on` yapar; GET kuyruk durumuyla birlikte güncel PDF tanımı alanlarını döndürür.
 

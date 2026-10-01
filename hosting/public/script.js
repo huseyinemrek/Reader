@@ -574,7 +574,6 @@ document.addEventListener('DOMContentLoaded', () => {
         disposePdfPages();
         pdfLayoutView.reset();
         pdfReadingAnchor = null;
-        if (currentPdfDoc) currentPdfDoc.destroy();
         currentPdfDoc = null;
         currentPdfOutline = [];
         currentBookId = null;
@@ -1512,7 +1511,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function createPdfPageSection(pageNumber) {
         const page = await currentPdfDoc.getPage(pageNumber);
-        const blocks = await getNativePdfBlocks(page, currentPdfDoc);
+        const blocks = await getNativePdfBlocks(page, currentPdfDoc, pdfjsLib);
         const section = createPdfPage(pageNumber);
         const text = section.querySelector('.pdf-page-text');
         const native = renderNativePdfBlocks(blocks, document, {onNavigate: page => goToPage(page)});

@@ -175,7 +175,7 @@ if (MODE === 'vps') {
                 return res.status(404).json({ error: 'Dosya bulunamadı.' });
             }
             const url = '/uploads/' + relative;
-            const generated = relative.match(/^pdf\/([A-Za-z0-9_-]{1,128})\/page-[1-9]\d*-v[1-9]\d*(?:-region-[1-9]\d*)?\.png$/);
+            const generated = relative.match(/^pdf\/([A-Za-z0-9_-]{1,128})\/page-[1-9]\d*-v[1-9]\d*(?:-native)?(?:-region-[1-9]\d*)?\.png$/);
             const book = library.find(candidate => (!candidate.userId || candidate.userId === req.user.uid) &&
                 (generated ? candidate.id === generated[1] : candidate.bookUrl === url || candidate.coverUrl === url));
             if (!book) return res.status(404).json({ error: 'Dosya bulunamadı.' });
@@ -206,7 +206,7 @@ app.get('/book/:id', (req, res) => {
 app.get('/libs/jszip.min.js', (req, res) => res.sendFile(path.join(__dirname, 'libs', 'jszip.min.js')));
 for (const filename of ['layout-bundle.js', 'cloud-reader.js', 'range-archive.js', 'upload-queue.js',
     'pdf-outline.js', 'pdf-reader.js', 'pdf-viewer.js', 'pdf-layout-view.js', 'pdf-layout.css',
-    'server-reader.js', 'pdf-layout-core.mjs', 'pdf-fonts.mjs']) {
+    'server-reader.js', 'pdf-layout-core.mjs', 'pdf-fonts.mjs', 'pdf-graphics.mjs']) {
     app.get(`/reader-core/${filename}`, (req, res) => res.sendFile(path.join(__dirname, '..', 'hosting', 'public', filename)));
 }
 for (const directory of ['katex/dist', 'pdfjs-dist/build', 'pdfjs-dist/cmaps', 'pdfjs-dist/standard_fonts', 'pdfjs-dist/wasm']) {

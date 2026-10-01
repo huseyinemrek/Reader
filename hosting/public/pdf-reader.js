@@ -1,17 +1,44 @@
-import { nativeBlocks, nativePdfLinks } from './pdf-layout-core.mjs';
-import { nativeTextContent } from './pdf-fonts.mjs';
+import { extractNativePdfPage } from './pdf-graphics.mjs';
 
-/** Extract source paragraphs and per-run typography from a PDF.js page. */
-export async function getNativePdfBlocks(page, pdfDocument) {
-    const content = await nativeTextContent(page);
-    return nativeBlocks(content, page.getViewport({ scale: 1 }), await nativePdfLinks(page, pdfDocument));
+/** Extract source paragraphs, typography and illustrations without OCR. */
+export async function getNativePdfBlocks(page, pdfDocument, pdfjs = globalThis.pdfjsLib) {
+    const unit = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: Math.min(2.5, 3200 / Math.max(unit.width, unit.height)) });
+    const { blocks, canvas } = await extractNativePdfPage(page, pdfDocument, {
+        OPS: pdfjs.OPS, viewport,
+        createCanvas: (width, height) => {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            return canvas;
+        },
+        imageUrl: crop => crop.toDataURL('image/png')
+    });
+    if (canvas) { canvas.width = 0; canvas.height = 0; }
+    return blocks;
 }
 
 /** Return reflowable DOM. Reader CSS owns user family, base size, and color. */
-export function renderNativePdfBlocks(blocks, targetDocument = globalThis.document, { onNavigate } = {}) {
+export function renderNativePdfBlocks(blocks, targetDocument = globalThis.document, { onNavigate, assetUrl = url => url } = {}) {
     const text = targetDocument.createElement('div');
     text.className = 'pdf-native-text';
     for (const block of blocks) {
+        if (block.type === 'image') {
+            const figure = targetDocument.createElement('figure');
+            figure.className = 'pdf-figure';
+            if (block.pageWidth > 0) {
+                figure.style.width = Math.min(100, block.width / block.pageWidth * 100) + '%';
+                figure.style.marginLeft = block.bbox.x0 / block.pageWidth * 100 + '%';
+            }
+            const graphic = targetDocument.createElement('img');
+            graphic.src = assetUrl(block.imageUrl);
+            graphic.width = block.width;
+            graphic.height = block.height;
+            graphic.alt = block.alt;
+            figure.appendChild(graphic);
+            text.appendChild(figure);
+            continue;
+        }
         const paragraph = targetDocument.createElement('p');
         paragraph.className = 'pdf-text-block';
         paragraph.dataset.ttsText = block.text;
