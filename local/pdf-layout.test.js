@@ -30,6 +30,20 @@ test('wrapped discretionary and true compound hyphens are distinguished by page 
     consistent(blocks);
 });
 
+test('source paragraph indentation is preserved only when actually present in layout', () => {
+    const blocks = nativeBlocks({ items: [
+        item('Chapter One', 200, 850, 16, 100),
+        item('First paragraph starts flush with column edge and continues', 100, 800, 10, 320),
+        item('down to the second line of the first paragraph.', 100, 785, 10, 260),
+        item('Second paragraph starts with a real indent.', 120, 750, 10, 240),
+        item('Its continuation line wraps back to column margin.', 100, 735, 10, 280),
+        item('Third paragraph also starts with an indent.', 120, 700, 10, 240),
+        item('And continues here normally.', 100, 685, 10, 160)
+    ] }, viewport);
+    assert.deepEqual(blocks.map(b => b.indented), [undefined, undefined, true, true]);
+    consistent(blocks);
+});
+
 const viewport = { scale: 1, transform: [1, 0, 0, -1, 0, 900] };
 function item(str, x, y, size, width, hasEOL = true) {
     return { str, transform: [size, 0, 0, size, x, y], width, height: size, hasEOL, fontName: 'body' };

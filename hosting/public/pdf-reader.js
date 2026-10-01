@@ -42,6 +42,7 @@ export function renderNativePdfBlocks(blocks, targetDocument = globalThis.docume
         const paragraph = targetDocument.createElement('p');
         paragraph.className = 'pdf-text-block';
         paragraph.dataset.ttsText = block.text;
+        if (block.indented) paragraph.classList.add('pdf-text-indented');
         if (block.preserveWhitespace) paragraph.dataset.preserveWhitespace = 'true';
         for (const run of block.runs) {
             const span = targetDocument.createElement('span');

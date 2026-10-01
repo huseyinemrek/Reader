@@ -2099,6 +2099,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             const p = document.createElement('p');
             p.className = 'pdf-text-block';
+            if (block.indented) p.classList.add('pdf-text-indented');
             if (block.preserveWhitespace) p.dataset.preserveWhitespace = 'true';
             p.dataset.ttsText = block.text;
             for (const run of block.runs) {

@@ -340,6 +340,9 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await page.$eval('#text-color-picker', element => {
                 element.value = '#e8c18a'; element.dispatchEvent(new Event('input', { bubbles: true }));
             });
+            await page.$eval('#side-padding-slider', element => {
+                element.value = '70'; element.dispatchEvent(new Event('input', { bubbles: true }));
+            });
             await page.click('#settings-close');
             const verify = async () => {
                 await page.waitForFunction(() => {
@@ -358,6 +361,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 assert.ok(runs.bold.weight >= 600 && runs.regular.weight < 600);
                 assert.ok(Math.abs(runs.larger.size / runs.regular.size - 22 / 14) < 0.01);
                 assert.ok(Math.abs(runs.smaller.size / runs.regular.size - 10 / 14) < 0.01);
+                assert.equal(await page.$eval('#book-content', el => getComputedStyle(el).paddingLeft), '70px');
             };
             await verify();
             await page.reload({ waitUntil: 'domcontentloaded' });

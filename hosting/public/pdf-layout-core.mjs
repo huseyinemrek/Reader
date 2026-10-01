@@ -181,6 +181,14 @@ function layoutBlocks(source, figures = []) {
         else groups.push([line]);
     }
     const vocabulary = new Set(lines.flatMap(line => clean(line.text).toLowerCase().match(/[\p{L}]+(?:-[\p{L}]+)*/gu) || []));
+    const columnBaselines = [];
+    for (const group of groups) {
+        if (group.length >= 2) {
+            const bodyLeft = Math.min(...group.slice(1).map(row => row.bbox.x0));
+            const bodyRight = Math.max(...group.slice(1).map(row => row.bbox.x1));
+            columnBaselines.push({ left: bodyLeft, right: bodyRight, size: group[0].size });
+        }
+    }
     const blocks = groups.map(group => {
         const runs = [];
         let bbox = group[0].bbox;
@@ -222,7 +230,27 @@ function layoutBlocks(source, figures = []) {
             }
             for (const part of line.parts) append(part.text, part.size, part, part.link);
         });
-        const block = { type: 'text', text: runs.map(run => run.text).join(''), bbox, runs };
+        const firstLine = group[0];
+        const firstLeft = firstLine.bbox.x0;
+        const firstWidth = firstLine.bbox.x1 - firstLeft;
+        const size = firstLine.size;
+        let indented = false;
+        if (group.length >= 2) {
+            const bodyLeft = Math.min(...group.slice(1).map(row => row.bbox.x0));
+            const indent = firstLeft - bodyLeft;
+            indented = indent > size * 0.5 && indent < firstWidth * 0.6;
+        } else {
+            const matchingColumn = columnBaselines.find(col =>
+                Math.min(col.right, firstLine.bbox.x1) > Math.max(col.left, firstLeft));
+            if (matchingColumn) {
+                const indent = firstLeft - matchingColumn.left;
+                const columnCenter = (matchingColumn.left + matchingColumn.right) / 2;
+                const lineCenter = (firstLeft + firstLine.bbox.x1) / 2;
+                const isCentered = Math.abs(lineCenter - columnCenter) < size;
+                indented = !isCentered && indent > size * 0.5 && indent < firstWidth * 0.6;
+            }
+        }
+        const block = { type: 'text', text: runs.map(run => run.text).join(''), bbox, runs, ...(indented ? { indented: true } : {}) };
         sourceLines.set(block, { lines: group, reference });
         return block;
     });

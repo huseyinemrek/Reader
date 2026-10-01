@@ -1558,3 +1558,7 @@ dialog.modal-overlay::backdrop {
 .jump-hint strong {
     color: #aaa;
 }
+
+.pdf-text-block.pdf-text-indented {
+    text-indent: 1.8em;
+}

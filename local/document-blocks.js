@@ -148,6 +148,7 @@ function textBlocks(region, bbox) {
     const blocks = [];
     let runs = [];
     let plain = '';
+    let currentIndented = /^(?:[ \t]{2,}|\t|[\u3000\u2000-\u200A])/u.test(content);
     function appendPlain() {
         if (!plain) return;
         const previous = runs[runs.length - 1];
@@ -167,9 +168,11 @@ function textBlocks(region, bbox) {
         }
         if (runs.length && runs.some(run => run.type === 'math' || run.text.trim())) {
             blocks.push({ type: 'text', text: runs.filter(run => run.type === 'text').map(run => run.text).join(''),
-                bbox, runs, ...(preserve ? { preserveWhitespace: true } : {}) });
+                bbox, runs, ...(preserve ? { preserveWhitespace: true } : {}),
+                ...(currentIndented && !preserve ? { indented: true } : {}) });
         }
         runs = [];
+        currentIndented = false;
     }
     for (let index = 0; index < content.length;) {
         // Fences preserve literal code. A layout-classified source algorithm is
@@ -190,6 +193,7 @@ function textBlocks(region, bbox) {
         if (paragraphBreak) {
             flush();
             index += paragraphBreak[0].length;
+            currentIndented = /^(?:[ \t]{2,}|\t|[\u3000\u2000-\u200A])/u.test(content.slice(index));
             continue;
         }
         if (index === 0 || content[index - 1] === '\n') {

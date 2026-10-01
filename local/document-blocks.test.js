@@ -244,6 +244,13 @@ test('physical prose lines reflow across inline math while blank lines preserve 
     assert.equal(blocks[0].preserveWhitespace, undefined);
 });
 
+test('OCR paragraphs preserve indentation when leading whitespace or tabs exist', async () => {
+    const blocks = await parse([
+        textRegion('First paragraph has no indent.\n\n    Second paragraph has an indent.\n\n\tThird paragraph has tab indent.\n\nFourth paragraph has no indent.')
+    ]);
+    assert.deepEqual(blocks.map(b => b.indented), [undefined, true, true, undefined]);
+});
+
 test('literal code and poetry keep meaningful line structure while surrounding prose reflows', async () => {
     const blocks = await parse([
         textRegion('Before\ncode.\n\n```python\nif ready:\n    run()\n```\nAfter\ncode.'),

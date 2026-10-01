@@ -40,6 +40,12 @@
     max-width: min(var(--max-width), calc(100vw - 40px)) !important;
 }
 
+#book-content.pdf-content[data-pdf-layout="text-only"],
+#reader-view.paged-mode #book-viewport.pdf-paged-viewport:has([data-pdf-layout="text-only"]) #book-content {
+    padding-left: var(--side-padding, 80px) !important;
+    padding-right: var(--side-padding, 80px) !important;
+}
+
 .pdf-page-comparison {
     overflow: visible;
 }
@@ -72,6 +78,7 @@
     white-space: normal;
     overflow-wrap: anywhere;
     min-height: calc(100vh - 180px);
+    padding-inline: clamp(10px, calc(var(--side-padding, 80px) * 0.45), 48px);
 }
 
 [data-pdf-layout="text-left"] .pdf-page-image-column {
@@ -273,6 +280,10 @@
 
 .pdf-text-block {
     white-space: normal;
+}
+
+.pdf-text-block.pdf-text-indented {
+    text-indent: 1.8em;
 }
 
 .pdf-text-block a.pdf-source-link {
