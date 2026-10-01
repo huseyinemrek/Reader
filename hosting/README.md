@@ -49,10 +49,23 @@ Tarayıcınızda `http://localhost:5000` adresinden açabilirsiniz.
 
 ### 4. Canlıya Dağıtım
 
+#### GitHub Actions ile Otomatik Dağıtım (CI/CD)
+
+`main` dalına push yapıldığında `.github/workflows/deploy.yml` workflow'u tetiklenir ve Firebase Hosting sürümünü (`https://book-reader-upload.web.app`) otomatik olarak canlıya alır.
+
+İlgili GitHub Secrets:
+- `FIREBASE_TOKEN`: Firebase CLI CI yetkilendirme belirteci (`firebase login:ci`).
+- `FIREBASE_CONFIG_JS`: `hosting/public/firebase-config.js` dosyasının içeriği (Web SDK istemci konfigürasyonu).
+
+Workflow, `FIREBASE_CONFIG_JS` içeriğinden `hosting/public/firebase-config.js` ve `.firebaserc` dosyalarını oluşturup `firebase deploy --only hosting` adımını çalıştırır.
+
+#### Manuel Dağıtım
+
 ```bash
 firebase deploy --only "hosting,firestore:rules,storage"
+# Yalnızca hosting dosyalarını güncellemek için:
+firebase deploy --only hosting
 ```
-
 ### 5. Cloud Storage CORS Ayarları
 
 Storage üzerinden Range isteklerinin tarayıcıda sorunsuz çalışabilmesi için CORS kuralını uygulayın:

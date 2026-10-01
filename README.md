@@ -158,10 +158,12 @@ Kendi Firebase projenizde barındırmak için:
    ```
 3. `public/firebase-config.js` dosyasını kendi Firebase Konsolunuzdaki Web App ayarlarıyla doldurun.
 4. Dağıtımı gerçekleştirin:
-   ```bash
-   firebase login
-   firebase deploy --only "hosting,firestore:rules,storage"
-   ```
+   - **Otomatik (GitHub Actions):** `main` dalına push yapıldığında `.github/workflows/deploy.yml` üzerinden hem VPS hem de Firebase Hosting (`https://book-reader-upload.web.app`) otomatik dağıtılır (GitHub Secrets: `FIREBASE_TOKEN`, `FIREBASE_CONFIG_JS`).
+   - **Manuel CLI Dağıtımı:**
+     ```bash
+     firebase login
+     firebase deploy --only "hosting,firestore:rules,storage"
+     ```
 5. Cloud Storage için CORS yapılandırmasını uygulayın:
    ```bash
    gcloud storage buckets update gs://<PROJE_ID>.firebasestorage.app --cors-file=storage.cors.json
