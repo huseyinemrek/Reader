@@ -1,0 +1,1 @@
+-r ../local/document-ocr-cuda-requirements.txt

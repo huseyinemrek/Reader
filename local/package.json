@@ -9,6 +9,7 @@
   "dependencies": {
     "@napi-rs/canvas": "^1.0.9",
     "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
     "express": "^4.22.2",
     "katex": "^0.18.9",
     "multer": "^1.4.5-lts.1",
@@ -19,6 +20,11 @@
     "start": "node server.js",
     "ocr:setup": "node document-ocr.js --setup",
     "ocr:setup:cpu": "node document-ocr.js --setup --cpu",
-    "test": "node --test pdf-layout.test.js pdf-regions.test.js document-blocks.test.js pdf-windows.test.js firebase-auth.test.js"
+    "test": "node --test pdf-layout.test.js pdf-regions.test.js document-blocks.test.js pdf-windows.test.js firebase-auth.test.js ocr-queue.test.js pdf-ocr.test.js",
+    "test:reader": "node --test ../tests/reader.test.cjs",
+    "check": "npm test && npm run test:reader"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.12.0"
   }
 }

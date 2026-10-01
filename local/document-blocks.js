@@ -66,15 +66,12 @@ function sourceMathSpans(region) {
     return spans;
 }
 
-function checkedLatex(content, display, proseContext = false) {
-    let latex = content.trim();
-    if (proseContext) {
-        // GLM sometimes puts prose inside \mathrm, where TeX drops word spaces.
-        // Preserve those source words in algorithm instructions. Single-letter
-        // products and math commands retain their original mathematical meaning.
-        latex = latex.replace(/\\mathrm\{(\p{L}+(?:[ \t]+\p{L}+)+)\}([ \t]*)/gu, (macro, words, gap) =>
-            words.split(/[ \t]+/u).filter(word => /\p{L}{2}/u.test(word)).length >= 2 ? `\\text{${words}${gap}}` : macro);
-    }
+function checkedLatex(content, display) {
+    // In roman math TeX discards spaces. Only unambiguous multiword prose is
+    // converted: products (A B), operator arguments (sin x), commands and
+    // nested mathematical groups retain their original semantics.
+    const latex = content.trim().replace(/\\mathrm[ \t]*\{(\p{L}+(?:[ \t]+\p{L}+)+)\}([ \t]*)/gu, (macro, words, gap) =>
+        words.split(/[ \t]+/u).filter(word => /\p{L}{2}/u.test(word)).length >= 2 ? `\\text{${words}${gap}}` : macro);
     if (!latex) throw new Error('The document model returned an empty formula.');
     try {
         katex.renderToString(latex, { displayMode: display, throwOnError: true, trust: false });
@@ -134,7 +131,7 @@ function spliceInlineMath(region, width, height) {
                 throw new Error('Inline formula source regions are not in reading order.');
             }
         }
-        const latex = checkedLatex(span.latex, false, region.layoutLabel === 'algorithm');
+        const latex = checkedLatex(span.latex, false);
         content += region.content.slice(previousEnd, span.start) + '\\(' + latex + '\\)';
         previousEnd = span.end;
         previousBox = box;
@@ -145,6 +142,9 @@ function spliceInlineMath(region, width, height) {
 function textBlocks(region, bbox) {
     const content = region.content.replace(/\r\n?/gu, '\n');
     const fontScale = region.fontScale ?? 1;
+    const preserveWhitespace = region.preserveWhitespace === true ||
+        ['algorithm', 'code', 'poetry', 'verse'].includes(region.layoutLabel) ||
+        /[^ \t\n][ \t]{2,}\n/u.test(content);
     const blocks = [];
     let runs = [];
     let plain = '';
@@ -155,10 +155,19 @@ function textBlocks(region, bbox) {
         else runs.push({ type: 'text', text: plain, fontScale });
         plain = '';
     }
-    function flush() {
+    function flush(preserve = preserveWhitespace) {
         appendPlain();
+        if (!preserve) {
+            for (const run of runs) {
+                if (run.type === 'text') run.text = run.text.replace(/[ \t]*\n[ \t]*/gu, ' ');
+            }
+            if (runs[0]?.type === 'text') runs[0].text = runs[0].text.trimStart();
+            if (runs.at(-1)?.type === 'text') runs.at(-1).text = runs.at(-1).text.trimEnd();
+            runs = runs.filter(run => run.type === 'math' || run.text.length > 0);
+        }
         if (runs.length && runs.some(run => run.type === 'math' || run.text.trim())) {
-            blocks.push({ type: 'text', text: runs.filter(run => run.type === 'text').map(run => run.text).join(''), bbox, runs });
+            blocks.push({ type: 'text', text: runs.filter(run => run.type === 'text').map(run => run.text).join(''),
+                bbox, runs, ...(preserve ? { preserveWhitespace: true } : {}) });
         }
         runs = [];
     }
@@ -173,13 +182,14 @@ function textBlocks(region, bbox) {
             flush();
             const fenced = content.slice(opener + 1, end);
             if (region.layoutLabel === 'algorithm') blocks.push(...textBlocks({ ...region, content: fenced }, bbox));
-            else { plain = fenced; flush(); }
+            else { plain = fenced; flush(true); }
             index = end + 4;
             continue;
         }
-        if (content.startsWith('\n\n', index)) {
+        const paragraphBreak = content[index] === '\n' && content.slice(index).match(/^\n(?:[ \t]*\n)+/u);
+        if (paragraphBreak) {
             flush();
-            while (content[index] === '\n') index += 1;
+            index += paragraphBreak[0].length;
             continue;
         }
         if (index === 0 || content[index - 1] === '\n') {
@@ -215,7 +225,7 @@ function textBlocks(region, bbox) {
             if (trailingLabel) index += trailingLabel[0].length;
         } else {
             appendPlain();
-            runs.push({ type: 'math', display: false, latex: checkedLatex(body, false, region.layoutLabel === 'algorithm'), fontScale });
+            runs.push({ type: 'math', display: false, latex: checkedLatex(body, false), fontScale });
         }
     }
     flush();
@@ -267,6 +277,7 @@ async function documentBlocks(result, context) {
         if (!['text', 'formula', 'figure', 'table'].includes(region?.kind) || typeof region.content !== 'string' ||
             !bbox || !['x0', 'y0', 'x1', 'y1'].every(key => Number.isFinite(bbox[key]) && bbox[key] >= 0) ||
             bbox.x1 <= bbox.x0 || bbox.y1 <= bbox.y0 || bbox.x1 > width || bbox.y1 > height ||
+            region.preserveWhitespace !== undefined && typeof region.preserveWhitespace !== 'boolean' ||
             region.fontScale !== undefined && (!Number.isFinite(region.fontScale) || region.fontScale <= 0) ||
             region.label !== undefined && typeof region.label !== 'string') {
             throw new Error(`Invalid document model region ${index + 1}.`);

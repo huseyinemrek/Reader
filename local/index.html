@@ -152,12 +152,54 @@
             </div>
 
             <div class="setting-group" id="original-pdf-setting" hidden>
-                <label>PDF Görünümü</label>
+                <label for="pdf-layout">PDF Görünümü</label>
+                <select id="pdf-layout">
+                    <option value="text-only">Yalnız metin</option>
+                    <option value="text-right">Metin sağda + PDF solda</option>
+                    <option value="text-left">Metin solda + PDF sağda</option>
+                </select>
+                <small>İki sütun arasındaki ayırıcıyı sürükleyerek genişlikleri ayarlayın. Klavyeyle odaklayıp sol/sağ ok tuşlarını da kullanabilirsiniz. Dar ekranda iki sütunu yatay kaydırabilirsiniz.</small>
                 <a id="open-original-pdf" class="mode-btn" target="_blank" rel="noopener noreferrer">
                     <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Orijinal PDF'yi tarayıcıda aç
                 </a>
-                <small>Orijinal PDF, yakınlaştırılabilir gerçek PDF renderer ile yanında açılır; grafikler ve denklemler kaynak haliyle korunur. Metin yoksa yerel belge OCR, seçilebilir metin ve LaTeX denklemleri çıkarır; model, cihaz ve tanıma durumu sayfada gösterilir. Sonucu kaynakla karşılaştırın: OCR hataları olabilir. Sayfadaki OCR düğmesi önbelleği kullanmak yerine sonucu yeniden üretir.</small>
+                <small>PDF görünümü kaynak sayfayı aynen korur. Metin sütunu PDF’nin kendi metin katmanını veya açıkça belirtilen OCR sonucunu gösterir; OCR hatalarını kaynakla karşılaştırın.</small>
             </div>
+            <div class="setting-group" id="pdf-ocr-setting" hidden>
+                <label for="pdf-ocr-mode">Bu kitap için OCR</label>
+                <select id="pdf-ocr-mode" aria-describedby="pdf-ocr-description">
+                    <option value="auto">Otomatik — yalnız taranmış kitaplarda OCR</option>
+                    <option value="on">Açık — okunan tüm sayfalarda OCR</option>
+                    <option value="off">Kapalı — yalnız PDF’nin kendi metni</option>
+                </select>
+                <small id="pdf-ocr-description" role="status"></small>
+                <small>Bu seçim kitapla birlikte kaydedilir. Kapalıyken bile sayfadaki düğmeyle yalnız o sayfayı OCR yapabilirsiniz. Yerel kullanımda “Açık”, kitabın ziyaret ettiğiniz sayfalarını yerel motorla işler.</small>
+                <button id="pdf-ocr-current" class="mode-btn" type="button">Geçerli sayfayı OCR yap / yeniden üret</button>
+            </div>
+            <details id="compute-panel" class="compute-panel" hidden>
+                <summary>OCR işleme ve dışarı çıkmadan kitap hazırlama</summary>
+                <p>VPS kendi OCR motoruyla çalışabilir. Bilgisayar seçildiğinde işler evde başlattığınız GPU worker’ını bekler; ev ağına port açılmaz. Hazır metinler VPS diskinde kalır.</p>
+                <form id="compute-form" class="compute-form">
+                    <label for="compute-mode">İşleme yeri
+                        <select id="compute-mode">
+                            <option value="vps">VPS’nin kendi OCR motoru</option>
+                            <option value="compute">Bilgisayarım / GPU worker</option>
+                        </select>
+                    </label>
+                    <label for="compute-scope">Hazırlanacak sayfalar
+                        <select id="compute-scope">
+                            <option value="all">Tüm kitap</option>
+                            <option value="range">Sayfa aralığı</option>
+                            <option value="current">Yalnız bu sayfa</option>
+                        </select>
+                    </label>
+                    <div id="compute-range" class="compute-range" hidden>
+                        <label for="compute-from">İlk sayfa <input id="compute-from" type="number" min="1" value="1"></label>
+                        <label for="compute-to">Son sayfa <input id="compute-to" type="number" min="1" value="1"></label>
+                    </div>
+                    <button id="compute-submit" class="mode-btn" type="submit">OCR hazırlamayı başlat</button>
+                </form>
+                <p id="compute-status" role="status" aria-live="polite"></p>
+            </details>
             <hr>
 
             <!-- Custom Colors -->

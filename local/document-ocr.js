@@ -5,11 +5,14 @@ const path = require('path');
 const { spawn } = require('child_process');
 const readline = require('readline');
 
-const PYTHON = path.join(__dirname, '.venv-ocr', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+const PYTHON = process.env.OCR_PYTHON || path.join(__dirname, '.venv-ocr', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 const WORKER = path.join(__dirname, 'document-ocr-worker.py');
 const MAX_QUEUED = 8;
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
-const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = Number(process.env.OCR_REQUEST_TIMEOUT_MS || 30 * 60 * 1000);
+if (!Number.isSafeInteger(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS < 1000) {
+    throw new Error('OCR_REQUEST_TIMEOUT_MS must be a positive integer of at least 1000 milliseconds.');
+}
 
 function createDocumentOcr() {
     let child;

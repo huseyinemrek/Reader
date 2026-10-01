@@ -4,8 +4,14 @@ let signInWithEmailAndPassword = null;
 let createUserWithEmailAndPassword = null;
 let signOut = null;
 let onAuthStateChanged = null;
+const PDF_PIPELINE_VERSION = 15;
+let readerRuntime = { mode: 'local', pipelineVersion: PDF_PIPELINE_VERSION };
 
 async function initFirebaseAuth() {
+    const runtimeResponse = await fetch('/api/runtime-config');
+    if (!runtimeResponse.ok) throw new Error('Sunucu çalışma yapılandırması okunamadı.');
+    readerRuntime = await runtimeResponse.json();
+    if (readerRuntime.authEnabled === false) return;
     let config = null;
 
     // 1. Sunucu API'sinden yapılandırmayı sorgula (.env veya ortam değişkenleri)
@@ -75,18 +81,48 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function authFetch(url, options = {}) {
-        const token = await getAuthToken();
+    async function authFetch(url, options = {}, assetToken) {
+        options.signal?.throwIfAborted();
+        const sameOrigin = new URL(url, location.href).origin === location.origin;
+        const token = sameOrigin ? (assetToken === undefined ? await getAuthToken() : assetToken) : null;
+        options.signal?.throwIfAborted();
         const headers = new Headers(options.headers || {});
         if (token) {
             headers.set('Authorization', 'Bearer ' + token);
+        } else if (!sameOrigin) {
+            headers.delete('Authorization');
         }
         const response = await fetch(url, { ...options, headers });
-        if (response.status === 401 && currentUser) {
+        if (response.status === 401 && currentUser && sameOrigin) {
             if (signOut && auth) await signOut(auth);
             throw new Error('Oturum süresi doldu. Lütfen tekrar giriş yapın.');
         }
         return response;
+    }
+
+    function authenticatedAsset(url, token) {
+        if (!token) return url;
+        const asset = new URL(url, location.href);
+        if (asset.origin !== location.origin) return url;
+        const protectedEpub = /^\/api\/books\/[^/]+\/epub\//.test(asset.pathname);
+        if (!protectedEpub && !(readerRuntime.mode === 'vps' && asset.pathname.startsWith('/uploads/'))) return url;
+        asset.searchParams.set('token', token);
+        return asset.pathname + asset.search + asset.hash;
+    }
+
+    function waitForCompute(signal, milliseconds = 3000) {
+        signal.throwIfAborted();
+        return new Promise((resolve, reject) => {
+            const aborted = () => {
+                clearTimeout(timer);
+                reject(signal.reason);
+            };
+            const timer = setTimeout(() => {
+                signal.removeEventListener('abort', aborted);
+                resolve();
+            }, milliseconds);
+            signal.addEventListener('abort', aborted, { once: true });
+        });
     }
 
     if (authForm) {
@@ -144,7 +180,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     let totalBookPages = 0;
     let currentPdfDoc = null;
     let currentPdfLoadingTask = null;
+    let currentPdfOutline = [];
     let pdfZoom = null;
+    let currentPdfMetadata = null;
+    let ocrPolicyChanging = false;
+    let computeTrackAbort = null;
+    let pdfSplitDrag = null;
+    let suppressPdfClickUntil = 0;
+    let pdfReadingAnchor = null;
     const pdfPageStates = new Map();
     const pdfResources = {
         cMapUrl: '/node_modules/pdfjs-dist/cmaps/',
@@ -189,6 +232,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const modePagedBtn = document.getElementById('mode-paged-btn');
     const originalPdfSetting = document.getElementById('original-pdf-setting');
     const openOriginalPdf = document.getElementById('open-original-pdf');
+    const pdfLayoutSelect = document.getElementById('pdf-layout');
+    const pdfOcrSetting = document.getElementById('pdf-ocr-setting');
+    const pdfOcrMode = document.getElementById('pdf-ocr-mode');
+    const pdfOcrDescription = document.getElementById('pdf-ocr-description');
+    const pdfOcrCurrent = document.getElementById('pdf-ocr-current');
     const openPageJumpBtn = document.getElementById('open-page-jump');
     const pageJumpModal = document.getElementById('page-jump-modal');
     const pageJumpClose = document.getElementById('page-jump-close');
@@ -197,6 +245,167 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pageJumpSubmit = document.getElementById('page-jump-submit');
     const jumpTotalPages = document.getElementById('jump-total-pages');
     const progressBar = document.getElementById('progress-bar');
+    const computePanel = document.getElementById('compute-panel');
+    const computeForm = document.getElementById('compute-form');
+    const computeMode = document.getElementById('compute-mode');
+    const computeScope = document.getElementById('compute-scope');
+    const computeRange = document.getElementById('compute-range');
+    const computeFrom = document.getElementById('compute-from');
+    const computeTo = document.getElementById('compute-to');
+    const computeSubmit = document.getElementById('compute-submit');
+    const computeStatus = document.getElementById('compute-status');
+
+    function showPdfMetadata(metadata) {
+        currentPdfMetadata = metadata;
+        pdfOcrMode.value = metadata.ocrMode;
+        const detected = metadata.textLayer === 'native'
+            ? 'Kitapta yerleşik PDF metni bulundu. Boş veya kısa kapak sayfaları otomatik OCR başlatmaz.'
+            : 'Kitap taranmış olarak algılandı; yerleşik okunabilir metin bulunamadı.';
+        pdfOcrDescription.textContent = detected + ' ' + (metadata.automaticOcr
+            ? 'Ziyaret edilen sayfalarda OCR açık.'
+            : 'Otomatik OCR kapalı; yalnız PDF’nin kendi metni gösterilir.');
+    }
+
+    pdfOcrMode.addEventListener('change', async () => {
+        if (currentBookType !== 'pdf' || !currentPdfMetadata || ocrPolicyChanging) return;
+        const token = session;
+        const previous = currentPdfMetadata;
+        const mode = pdfOcrMode.value;
+        ocrPolicyChanging = true;
+        pdfOcrMode.disabled = pdfOcrCurrent.disabled = computeSubmit.disabled = true;
+        computeTrackAbort?.abort();
+        stopTTS();
+        for (const [section, state] of pdfPageStates) {
+            state.abort?.abort();
+            const text = section.querySelector('.pdf-page-text');
+            text.style.minHeight = text.getBoundingClientRect().height + 'px';
+            text.replaceChildren();
+            delete section.dataset.textSource;
+            section.querySelector('[data-pdf-ocr]').disabled = true;
+            section.querySelector('.pdf-text-status').textContent = 'OCR tercihi kaydediliyor…';
+        }
+        try {
+            const response = await authFetch('/api/books/' + encodeURIComponent(currentBookId) + '/pdf/ocr', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode}), signal: sessionAbort.signal
+            });
+            const metadata = await response.json();
+            if (!response.ok) throw new Error(metadata.error || 'OCR tercihi kaydedilemedi.');
+            sessionAbort.signal.throwIfAborted();
+            if (token !== session) return;
+            showPdfMetadata(metadata);
+            computeStatus.textContent = metadata.automaticOcr
+                ? '' : 'Otomatik OCR kapalı. Sayfa veya kitap hazırlama işlemini açıkça başlatabilirsiniz.';
+        } catch (error) {
+            if (token !== session || sessionAbort.signal.aborted) return;
+            showPdfMetadata(previous);
+            pdfOcrDescription.textContent += ' Tercih kaydedilemedi: ' + error.message;
+        } finally {
+            if (token === session) {
+                ocrPolicyChanging = false;
+                pdfOcrMode.disabled = pdfOcrCurrent.disabled = computeSubmit.disabled = false;
+                for (const section of pdfPageStates.keys()) void hydratePdfPage(section);
+                if (readerRuntime.mode === 'vps' && currentPdfMetadata.automaticOcr) void trackComputeBook();
+            }
+        }
+    });
+
+    pdfOcrCurrent.addEventListener('click', () => {
+        if (ocrPolicyChanging) return;
+        const section = bookContent.querySelector('.pdf-page[data-page-index="' + currentPdfPage + '"]');
+        if (section) {
+            stopTTS();
+            void hydratePdfPage(section, true);
+        }
+    });
+
+    function showComputeStatus(info) {
+        const counts = info.counts;
+        computeStatus.textContent = `${counts.completed} / ${info.totalPages} sayfa hazır · ` +
+            `${counts.pending} bekliyor · ${counts.processing} işleniyor · ${counts.failed} hata. ` +
+            (info.mode === 'compute'
+                ? 'Evde GPU worker’ını başlatın; hazır sayfalar burada otomatik görünür.'
+                : 'VPS OCR arka planda çalışır; kaynak PDF’yi beklemeden okuyabilirsiniz.');
+        const failure = info.jobs.find(job => job.status === 'failed' && job.error);
+        if (failure) computeStatus.textContent += ` Sayfa ${failure.page}: ${failure.error}`;
+    }
+
+    async function trackComputeBook(initialize = false) {
+        computeTrackAbort?.abort();
+        const controller = new AbortController();
+        computeTrackAbort = controller;
+        const token = session;
+        const bookId = currentBookId;
+        const signal = controller.signal;
+        let initial = initialize;
+        try {
+            while (token === session && currentBookType === 'pdf') {
+                const response = await authFetch('/api/books/' + encodeURIComponent(bookId) + '/compute', { signal });
+                const info = await response.json();
+                if (!response.ok) throw new Error(info.error || 'OCR kuyruğu okunamadı.');
+                signal.throwIfAborted();
+                if (token !== session) return;
+                if (initial) {
+                    computeMode.value = info.mode;
+                    initial = false;
+                }
+                showComputeStatus(info);
+                if (!info.counts.pending && !info.counts.processing) return;
+                await waitForCompute(signal);
+            }
+        } catch (error) {
+            if (!signal.aborted && token === session) computeStatus.textContent = error.message;
+        }
+    }
+
+    computeScope.addEventListener('change', () => { computeRange.hidden = computeScope.value !== 'range'; });
+    computeMode.addEventListener('change', () => {
+        if (computeMode.value === 'compute') {
+            computeScope.value = 'all';
+            computeRange.hidden = true;
+        }
+    });
+    computeForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (currentBookType !== 'pdf' || readerRuntime.mode !== 'vps' || ocrPolicyChanging || computeSubmit.disabled) return;
+        const token = session;
+        const signal = sessionAbort.signal;
+        const body = { mode: computeMode.value };
+        if (computeScope.value === 'range') {
+            body.fromPage = Number(computeFrom.value);
+            body.toPage = Number(computeTo.value);
+            if (!Number.isSafeInteger(body.fromPage) || !Number.isSafeInteger(body.toPage) ||
+                body.fromPage < 1 || body.toPage < body.fromPage || body.toPage > totalPdfPages) {
+                computeStatus.textContent = `1–${totalPdfPages} arasında geçerli bir sayfa aralığı seçin.`;
+                return;
+            }
+        } else if (computeScope.value === 'current') {
+            body.fromPage = body.toPage = currentPdfPage;
+        }
+        computeSubmit.disabled = pdfOcrMode.disabled = true;
+        try {
+            const response = await authFetch('/api/books/' + encodeURIComponent(currentBookId) + '/compute', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal
+            });
+            const info = await response.json();
+            if (!response.ok) throw new Error(info.error || 'OCR işleri kuyruğa eklenemedi.');
+            signal.throwIfAborted();
+            if (token !== session) return;
+            showPdfMetadata(info);
+            showComputeStatus(info);
+            for (const section of pdfPageStates.keys()) {
+                const page = Number(section.dataset.pageIndex);
+                if ((body.fromPage && page < body.fromPage) || (body.toPage && page > body.toPage)) continue;
+                const job = info.jobs.find(item => item.page === page);
+                if (job) void hydratePdfPage(section, false, job.id);
+            }
+            void trackComputeBook();
+        } catch (error) {
+            if (!signal.aborted && token === session) computeStatus.textContent = error.message;
+        } finally {
+            if (token === session) computeSubmit.disabled = pdfOcrMode.disabled = false;
+        }
+    });
     // Sidebars
     const tocToggle = document.getElementById('toc-toggle');
     const tocSidebar = document.getElementById('toc-sidebar');
@@ -238,7 +447,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         maxWidth: '900',
         sidePadding: '80',
         paragraphSpacing: '1.5',
-        readingMode: 'scroll'
+        readingMode: 'scroll',
+        pdfLayout: 'text-right',
+        pdfTextRatio: 0.535
     };
 
     let currentSettings = { ...defaultSettings };
@@ -260,9 +471,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function saveSettings() {
+        const anchor = currentBookType === 'pdf' ? capturePdfReadingAnchor() : null;
         localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
         applySettings();
-        scheduleRepagination();
+        if (currentBookType === 'pdf') restorePdfReadingAnchor(anchor);
+        else scheduleRepagination();
     }
 
     function applySettings() {
@@ -307,6 +520,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 bookViewport.scrollLeft = 0;
             }
         }
+        applyPdfLayout();
     }
 
     function updateUI() {
@@ -324,6 +538,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         sidePaddingVal.textContent = currentSettings.sidePadding + 'px';
         paragraphSpacingSlider.value = currentSettings.paragraphSpacing;
         paragraphSpacingVal.textContent = currentSettings.paragraphSpacing + 'em';
+        pdfLayoutSelect.value = currentSettings.pdfLayout;
 
         if (modeScrollBtn && modePagedBtn) {
             if (currentSettings.readingMode === 'paged') {
@@ -346,6 +561,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     maxWidthSlider.addEventListener('input', (e) => { currentSettings.maxWidth = e.target.value; maxWidthVal.textContent = e.target.value + 'px'; saveSettings(); });
     sidePaddingSlider.addEventListener('input', (e) => { currentSettings.sidePadding = e.target.value; sidePaddingVal.textContent = e.target.value + 'px'; saveSettings(); });
     paragraphSpacingSlider.addEventListener('input', (e) => { currentSettings.paragraphSpacing = e.target.value; paragraphSpacingVal.textContent = e.target.value + 'em'; saveSettings(); });
+    pdfLayoutSelect.addEventListener('change', () => {
+        currentSettings.pdfLayout = pdfLayoutSelect.value;
+        saveSettings();
+        saveCurrentProgress();
+    });
 
     if (modeScrollBtn) {
         modeScrollBtn.addEventListener('click', () => {
@@ -362,11 +582,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     async function setReadingMode(mode) {
         const position = captureProgress()?.data.readerPosition;
+        const pdfAnchor = currentBookType === 'pdf' ? capturePdfReadingAnchor() : null;
         currentSettings.readingMode = mode;
         localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
         applySettings();
         updateUI();
         if (!currentBookId) return;
+        if (currentBookType === 'pdf') {
+            if (pdfAnchor?.section) currentPdfPage = currentGlobalPage = Number(pdfAnchor.section.dataset.pageIndex);
+            localPagedIndex = currentPdfPage - 1;
+            updatePagedView();
+            applyPdfLayout();
+            if (mode === 'paged') window.scrollTo({top: 0, behavior: 'instant'});
+            restorePdfReadingAnchor(pdfAnchor);
+            saveCurrentProgress();
+            if (mode === 'scroll') void updateScrollWindow();
+            return;
+        }
         await navigate(() => showLocation(currentChapterIndex, localPagedIndex, position?.scrollRatio ?? null));
         if (mode === 'scroll') updateScrollWindow();
     }
@@ -440,6 +672,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             const res = await authFetch('/api/books');
             globalLibrary = await res.json();
+            const assetToken = await getAuthToken();
             
             if (globalLibrary.length === 0) {
                 libraryGrid.innerHTML = '<p style="color:#888; grid-column: 1/-1; text-align:center;">Kütüphaneniz boş. Yukarıdan kitap ekleyerek başlayabilirsiniz.</p>';
@@ -456,7 +689,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 let coverHtml = `<div class="book-cover"><i class="fa-solid fa-book"></i></div>`;
                 if (bookData.coverUrl) {
-                    coverHtml = `<div class="book-cover" style="background-image: url('${bookData.coverUrl}')"></div>`;
+                    coverHtml = `<div class="book-cover" style="background-image: url('${authenticatedAsset(bookData.coverUrl, assetToken)}')"></div>`;
                 }
 
                 const progressPct = bookData.progress || 0;
@@ -512,9 +745,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         stopTTS();
         closePageJumpModal();
         disposePdfPages();
+        computeTrackAbort?.abort();
+        finishPdfSplitDrag();
+        computePanel.hidden = true;
+        computePanel.open = false;
+        pdfOcrSetting.hidden = originalPdfSetting.hidden = true;
+        pdfOcrMode.disabled = pdfOcrCurrent.disabled = false;
+        currentPdfMetadata = null;
+        ocrPolicyChanging = false;
+        pdfReadingAnchor = null;
+        computeSubmit.disabled = false;
+        computeStatus.textContent = '';
         if (currentPdfLoadingTask) currentPdfLoadingTask.destroy().catch(error => console.error('PDF kapatılamadı:', error));
         currentPdfLoadingTask = null;
         currentPdfDoc = null;
+        currentPdfOutline = [];
         pdfZoom = null;
         currentBookId = null;
         currentBookType = null;
@@ -590,7 +835,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const warning = missing ? missing + ' bölüm EPUB dosyasında eksik. Toplam yalnızca mevcut içeriği kapsar.' : '';
         pagedIndicator.title = warning || 'Sayfaya Git (G)';
         pagedPageText.textContent = isNavigatingPage && currentBookType === 'pdf'
-            ? 'PDF sayfası hazırlanıyor · Gerekirse yerel OCR çalışır…'
+            ? 'PDF sayfası hazırlanıyor…'
             : ready ? 'Sayfa ' + currentGlobalPage + ' / ' + totalBookPages + (missing ? ' · eksik EPUB' : '') : 'Sayfalar hesaplanıyor…';
         progressBar.style.width = ready ? (100 * currentGlobalPage / totalBookPages) + '%' : '0%';
         pageJumpInput.disabled = pageJumpSlider.disabled = pageJumpSubmit.disabled = !ready || isNavigatingPage;
@@ -615,7 +860,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     function captureProgress() {
         if (!currentBookId || !totalBookPages) return null;
         const count = currentBookType === 'epub' ? epubSpine[currentChapterIndex].pageCount : totalBookPages;
-        const section = bookContent.querySelector(':scope > section[data-index="' + currentChapterIndex + '"]');
+        const sectionIndex = currentBookType === 'pdf' ? currentPdfPage - 1 : currentChapterIndex;
+        const section = bookContent.querySelector(':scope > section[data-index="' + sectionIndex + '"]');
         const scrollRatio = currentSettings.readingMode === 'scroll' && section
             ? Math.max(0, Math.min(1, (80 - section.getBoundingClientRect().top) / Math.max(1, section.offsetHeight)))
             : localPagedIndex / Math.max(1, count);
@@ -801,6 +1047,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.scrollTo({top: Math.max(0, section.getBoundingClientRect().top + window.scrollY + ratio * section.offsetHeight - 80), behavior: 'instant'});
             updatePagedIndicator();
         }
+        if (type === 'pdf') pdfReadingAnchor = capturePdfReadingAnchor();
     }
 
     async function navigate(action) {
@@ -826,7 +1073,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function goToPage(page) {
-        if (!Number.isSafeInteger(page) || page < 1 || page > totalBookPages) return;
+        if (pdfSplitDrag || !Number.isSafeInteger(page) || page < 1 || page > totalBookPages) return;
         await navigate(async () => {
             if (currentBookType === 'epub') {
                 const index = epubSpine.findIndex(ch => page < ch.startPage + ch.pageCount);
@@ -863,7 +1110,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Keep only the visible scroll chapter and its neighbours hydrated. Empty
     // placeholders preserve scroll offsets and are rehydrated when revisited.
     async function updateScrollWindow() {
-        if (scrollWindowBusy || isNavigatingPage || currentSettings.readingMode !== 'scroll' || !['epub', 'pdf'].includes(currentBookType)) return;
+        if (scrollWindowBusy || isNavigatingPage || pdfSplitDrag || currentSettings.readingMode !== 'scroll' || !['epub', 'pdf'].includes(currentBookType)) return;
         scrollWindowBusy = true;
         const token = session;
         const location = locationVersion;
@@ -966,7 +1213,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     pagedPrevBtn.addEventListener('click', goToPrevPage);
     pagedNextBtn.addEventListener('click', goToNextPage);
     bookViewport.addEventListener('click', event => {
-        if (currentSettings.readingMode !== 'paged' || event.target.closest('a,button,input,select') || window.getSelection().toString()) return;
+        if (pdfSplitDrag || performance.now() < suppressPdfClickUntil || currentSettings.readingMode !== 'paged' ||
+            event.target.closest('a,button,input,select,[role="separator"]') || window.getSelection().toString()) return;
         const rect = bookViewport.getBoundingClientRect();
         const x = event.clientX - rect.left;
         if (x < rect.width * 0.25) goToPrevPage();
@@ -980,7 +1228,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
     window.addEventListener('keydown', event => {
-        if (!currentBookId || pageJumpModal.open || event.target.closest('input,textarea,select,[contenteditable="true"]')) return;
+        if (!currentBookId || pdfSplitDrag || pageJumpModal.open ||
+            event.target.closest('input,textarea,select,[contenteditable="true"],[role="separator"]')) return;
         if (event.ctrlKey || event.altKey || event.metaKey) return;
         if (event.key === 'Escape') {closeSidebar(settingsSidebar); closeSidebar(tocSidebar); return;}
         if (settingsSidebar.classList.contains('open') || tocSidebar.classList.contains('open')) return;
@@ -995,6 +1244,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     function scheduleRepagination() {
+        if (currentBookType === 'pdf') {
+            const anchor = pdfReadingAnchor;
+            applyPdfLayout();
+            restorePdfReadingAnchor(anchor);
+            return;
+        }
         if (!currentBookId || getLayoutKey() === layoutKey) return;
         layoutPosition = captureProgress()?.data.readerPosition || layoutPosition;
         const token = session;
@@ -1043,6 +1298,24 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (token !== session) return;
                 currentPdfDoc = pdf;
                 totalBookPages = totalPdfPages = pdf.numPages;
+                currentPdfOutline = await loadPdfOutline(pdf, sessionAbort.signal);
+                if (token !== session) return;
+                const metadataResponse = await authFetch('/api/books/' + encodeURIComponent(id) + '/pdf', {signal: sessionAbort.signal});
+                const metadata = await metadataResponse.json();
+                if (!metadataResponse.ok) throw new Error(metadata.error || 'PDF metin türü belirlenemedi.');
+                sessionAbort.signal.throwIfAborted();
+                if (token !== session) return;
+                showPdfMetadata(metadata);
+                pdfOcrSetting.hidden = false;
+                if (readerRuntime.mode === 'vps') {
+                    computePanel.hidden = false;
+                    computeScope.value = 'all';
+                    computeRange.hidden = true;
+                    computeFrom.max = computeTo.max = totalPdfPages;
+                    computeFrom.value = '1';
+                    computeTo.value = String(totalPdfPages);
+                    void trackComputeBook(true);
+                }
             } else {
                 currentBookType = 'html';
                 const response = await authFetch(book.bookUrl, {signal: sessionAbort.signal});
@@ -1055,7 +1328,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             if (token !== session) return;
             if (originalPdfSetting) originalPdfSetting.hidden = currentBookType !== 'pdf';
-            if (currentBookType === 'pdf' && openOriginalPdf) openOriginalPdf.href = book.bookUrl;
+            if (currentBookType === 'pdf' && openOriginalPdf) {
+                openOriginalPdf.href = authenticatedAsset(book.bookUrl, await getAuthToken());
+            }
             libraryView.classList.remove('active');
             libraryView.style.display = 'none';
             readerView.style.display = 'block';
@@ -1077,7 +1352,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (params.has('page') && !params.has('ch')) {
                 await goToPage(Math.max(1, Math.min(totalBookPages, Number(params.get('page')) || 1)));
             } else {
-                if (saved && saved.layoutKey !== layoutKey && !params.has('local')) {
+                if (currentBookType !== 'pdf' && saved && saved.layoutKey !== layoutKey && !params.has('local')) {
                     const count = currentBookType === 'epub' ? epubSpine[chapter].pageCount : totalBookPages;
                     await navigate(() => showLocation(chapter, Math.min(count - 1, Math.floor(saved.scrollRatio * count)), saved.scrollRatio));
                 }
@@ -1094,8 +1369,70 @@ document.addEventListener('DOMContentLoaded', async () => {
         } finally {if (token === session) hideLoading();}
     }
 
+    async function loadPdfOutline(pdf, signal) {
+        const outline = await pdf.getOutline();
+        signal.throwIfAborted();
+        async function resolve(entries) {
+            return Promise.all(entries.map(async entry => {
+                signal.throwIfAborted();
+                let page = null;
+                if (entry.dest) {
+                    try {
+                        const destination = typeof entry.dest === 'string'
+                            ? await pdf.getDestination(entry.dest) : entry.dest;
+                        if (Array.isArray(destination) && destination.length) {
+                            const reference = destination[0];
+                            const index = Number.isInteger(reference) ? reference
+                                : reference && typeof reference === 'object' ? await pdf.getPageIndex(reference) : -1;
+                            if (index >= 0 && index < pdf.numPages) page = index + 1;
+                        }
+                    } catch (error) {
+                        signal.throwIfAborted();
+                        console.warn('PDF içindekiler hedefi çözülemedi:', entry.title, error);
+                    }
+                }
+                const items = await resolve(entry.items || []);
+                signal.throwIfAborted();
+                return {title: entry.title, page, bold: entry.bold, italic: entry.italic, items};
+            }));
+        }
+        return resolve(outline || []);
+    }
+
+    function renderPdfToc(entries, list) {
+        for (const entry of entries) {
+            const li = document.createElement('li');
+            const label = document.createElement(entry.page ? 'a' : 'span');
+            label.textContent = entry.title;
+            if (entry.bold) label.style.fontWeight = 'bold';
+            if (entry.italic) label.style.fontStyle = 'italic';
+            if (entry.page) {
+                label.href = '/book/' + encodeURIComponent(currentBookId) + '?page=' + entry.page;
+                label.dataset.pdfPage = entry.page;
+                label.title = 'PDF sayfası ' + entry.page;
+                label.addEventListener('click', async event => {
+                    event.preventDefault();
+                    closeSidebar(tocSidebar);
+                    await goToPage(entry.page);
+                });
+            } else label.className = 'toc-group-title';
+            li.appendChild(label);
+            if (entry.items.length) {
+                const children = document.createElement('ul');
+                renderPdfToc(entry.items, children);
+                li.appendChild(children);
+            }
+            list.appendChild(li);
+        }
+    }
+
     function renderToc(book) {
         tocList.replaceChildren();
+        if (currentBookType === 'pdf') {
+            renderPdfToc(currentPdfOutline, tocList);
+            if (!tocList.children.length) tocList.textContent = 'PDF’de yer işareti/içindekiler kaydı bulunamadı.';
+            return;
+        }
         for (const item of book.toc || []) {
             const li = document.createElement('li');
             const link = document.createElement('a');
@@ -1244,8 +1581,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         return meta;
     }
 
-    async function fetchText(url, signal = sessionAbort.signal) {
-        const response = await authFetch(url, {signal});
+    async function fetchText(url, signal = sessionAbort.signal, assetToken) {
+        const response = await authFetch(url, {signal}, assetToken);
         if (!response.ok) {
             const error = new Error('Kitap kaynağı alınamadı (' + response.status + '): ' + decodeURIComponent(url.split('/').at(-1)));
             error.status = response.status;
@@ -1282,40 +1619,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function loadEpubChapter(index, targetDocument = document, signal = sessionAbort.signal) {
         const chapter = epubSpine[index];
         if (!chapter) throw new Error('Bölüm bulunamadı.');
-        const html = await fetchText(chapter.url, signal);
+        const activeSessionSignal = sessionAbort.signal;
+        signal.throwIfAborted();
+        activeSessionSignal.throwIfAborted();
+        const assetToken = await getAuthToken();
+        signal.throwIfAborted();
+        activeSessionSignal.throwIfAborted();
+        const html = await fetchText(chapter.url, signal, assetToken);
         signal.throwIfAborted();
         const doc = new DOMParser().parseFromString(html, 'text/html');
         let css = '';
         for (const style of doc.querySelectorAll('style')) {
-            css += await fixChapterCss(style.textContent, chapter.url, signal);
+            css += await fixChapterCss(style.textContent, chapter.url, signal, assetToken);
             style.remove();
         }
         for (const link of doc.querySelectorAll('link[rel="stylesheet"]')) {
             const url = resolveResource(link.getAttribute('href'), chapter.url);
             let text = stylesheetCache.get(url);
             if (text === undefined) {
-                text = await fetchText(url, signal);
+                text = await fetchText(url, signal, assetToken);
                 signal.throwIfAborted();
                 stylesheetCache.set(url, text);
             }
-            css += await fixChapterCss(text, url, signal);
+            css += await fixChapterCss(text, url, signal, assetToken);
         }
         doc.querySelectorAll('script,iframe,object,embed,base,link,form').forEach(el => el.remove());
         for (const el of doc.body.querySelectorAll('*')) {
             for (const attr of Array.from(el.attributes)) {
                 if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+                else if (el.namespaceURI === 'http://www.w3.org/2000/svg' && attr.name !== 'style' && /url\(/i.test(attr.value)) {
+                    el.setAttribute(attr.name, fixCssUrls(attr.value, chapter.url, assetToken));
+                }
             }
             if (el.hasAttribute('style')) {
-                el.style.color = el.style.backgroundColor = el.style.background = '';
+                el.style.color = el.style.backgroundColor = '';
                 normalizeChapterStyle(el.style);
-                el.setAttribute('style', fixCssUrls(el.getAttribute('style'), chapter.url));
+                el.setAttribute('style', fixCssUrls(el.getAttribute('style'), chapter.url, assetToken));
             }
             for (const name of ['src', 'href', 'xlink:href', 'poster']) {
-                if (el.hasAttribute(name)) el.setAttribute(name, resolveResource(el.getAttribute(name), chapter.url));
+                const attr = el.getAttributeNode(name);
+                if (!attr) continue;
+                const assetReference = !['href', 'xlink:href'].includes(name) ||
+                    (el.namespaceURI === 'http://www.w3.org/2000/svg' && el.localName !== 'a');
+                // SVG fragment references target the hydrated document, not a fresh chapter response.
+                const resolved = assetReference && attr.value.trim().startsWith('#')
+                    ? attr.value : resolveResource(attr.value, chapter.url);
+                const value = assetReference ? authenticatedAsset(resolved, assetToken) : resolved;
+                if (attr.namespaceURI) el.setAttributeNS(attr.namespaceURI, name, value);
+                else el.setAttribute(name, value);
             }
             // EPUB images use src; an unresolved srcset must not escape the archive route.
             el.removeAttribute('srcset');
         }
+        signal.throwIfAborted();
+        activeSessionSignal.throwIfAborted();
         const section = targetDocument.createElement('section');
         section.className = 'epub-chapter';
         section.id = chapter.id;
@@ -1330,8 +1687,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         return section;
     }
 
-    function fixCssUrls(css, base) {
-        return css.replace(/url\(\s*(['"]?)([^)'"\s]+)\1\s*\)/gi, (_, quote, url) => 'url("' + resolveResource(url, base).replace(/"/g, '%22') + '")');
+    function fixCssUrls(css, base, assetToken) {
+        return css.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]+))\s*\)/gi, (_, doubleQuoted, singleQuoted, unquoted) => {
+            const value = (doubleQuoted ?? singleQuoted ?? unquoted).trim();
+            const resolved = value.startsWith('#') ? value : resolveResource(value, base);
+            return 'url("' + authenticatedAsset(resolved, assetToken).replace(/"/g, '%22') + '")';
+        });
     }
 
     const absoluteFontSizeRatios = {
@@ -1373,7 +1734,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function fixChapterCss(css, base, signal, seen = new Set()) {
+    async function fixChapterCss(css, base, signal, assetToken, seen = new Set()) {
         if (seen.has(base)) return '';
         seen = new Set([...seen, base]);
         const imports = [...css.matchAll(/@import\s+(?:url\(\s*)?['"]([^'"]+)['"]\s*\)?[^;]*;/gi)];
@@ -1384,11 +1745,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 try {
                     let text = stylesheetCache.get(url);
                     if (text === undefined) {
-                        text = await fetchText(url, signal);
+                        text = await fetchText(url, signal, assetToken);
                         signal.throwIfAborted();
                         stylesheetCache.set(url, text);
                     }
-                    imported = await fixChapterCss(text, url, signal, seen);
+                    imported = await fixChapterCss(text, url, signal, assetToken, seen);
                 } catch (error) {
                     signal.throwIfAborted();
                     console.warn('EPUB stylesheet could not be loaded:', url, error);
@@ -1398,7 +1759,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         css = css.replace(/@import[^;]*;/gi, '').replace(/@namespace[^;]+;/gi, '');
         const sheet = new CSSStyleSheet();
-        sheet.replaceSync(fixCssUrls(css, base));
+        sheet.replaceSync(fixCssUrls(css, base, assetToken));
         normalizeChapterRules(sheet.cssRules);
         return Array.from(sheet.cssRules)
             .filter(rule => rule.type !== CSSRule.PAGE_RULE && rule.type !== CSSRule.NAMESPACE_RULE)
@@ -1442,7 +1803,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         const ocrButton = event.target.closest('[data-pdf-ocr]');
-        if (ocrButton && currentBookType === 'pdf') {
+        if (ocrButton && currentBookType === 'pdf' && !ocrPolicyChanging) {
             const section = ocrButton.closest('.pdf-page');
             stopTTS();
             await hydratePdfPage(section, true);
@@ -1515,11 +1876,154 @@ document.addEventListener('DOMContentLoaded', async () => {
         return math;
     }
 
+    function capturePdfReadingAnchor() {
+        if (currentBookType !== 'pdf') return null;
+        const paged = currentSettings.readingMode === 'paged';
+        const line = paged ? bookViewport.getBoundingClientRect().top + 20 : 100;
+        const section = paged
+            ? bookContent.querySelector('.pdf-page[data-page-index="' + currentPdfPage + '"]')
+            : Array.from(bookContent.children).find(element => element.getBoundingClientRect().bottom > line);
+        if (!section || section.dataset.loaded !== 'true') return null;
+        const blocks = Array.from(section.querySelector('.pdf-page-text')?.children || []);
+        const node = blocks.find(element => element.getBoundingClientRect().bottom > line) || section;
+        const rect = node.getBoundingClientRect();
+        const point = Math.max(line, rect.top);
+        return {section, node, index: blocks.indexOf(node), point,
+            fraction: Math.max(0, Math.min(1, (point - rect.top) / Math.max(1, rect.height)))};
+    }
+
+    function restorePdfReadingAnchor(anchor) {
+        if (!anchor?.section.isConnected) return;
+        const node = anchor.node.isConnected ? anchor.node
+            : anchor.section.querySelector('.pdf-page-text')?.children[anchor.index] || anchor.section;
+        const rect = node.getBoundingClientRect();
+        const delta = rect.top + anchor.fraction * rect.height - anchor.point;
+        if (currentSettings.readingMode === 'paged') bookViewport.scrollBy({top: delta, behavior: 'instant'});
+        else window.scrollBy({top: delta, behavior: 'instant'});
+        pdfReadingAnchor = capturePdfReadingAnchor();
+    }
+
+    function pdfSplitBounds(columns) {
+        const columnWidth = columns.clientWidth;
+        const width = Math.max(1, columnWidth - 40);
+        const minimum = columnWidth ? Math.min(0.49, Math.max(0.2, 220 / width)) : 0.2;
+        return {minimum, maximum: 1 - minimum, width};
+    }
+
+    function applyPdfLayout() {
+        if (!['text-only', 'text-right', 'text-left'].includes(currentSettings.pdfLayout)) currentSettings.pdfLayout = 'text-right';
+        const ratio = Number(currentSettings.pdfTextRatio);
+        currentSettings.pdfTextRatio = Number.isFinite(ratio) ? Math.max(0.2, Math.min(0.8, ratio)) : 0.535;
+        bookContent.dataset.pdfLayout = currentSettings.pdfLayout;
+        for (const [section, state] of pdfPageStates) {
+            const columns = section.querySelector('.pdf-page-columns');
+            const bounds = pdfSplitBounds(columns);
+            const textRatio = Math.max(bounds.minimum, Math.min(bounds.maximum, currentSettings.pdfTextRatio));
+            const leftRatio = currentSettings.pdfLayout === 'text-left' ? textRatio : 1 - textRatio;
+            columns.style.setProperty('--pdf-left-fr', leftRatio + 'fr');
+            columns.style.setProperty('--pdf-right-fr', (1 - leftRatio) + 'fr');
+            const splitter = columns.querySelector('.pdf-splitter');
+            splitter.setAttribute('aria-valuemin', Math.round(bounds.minimum * 100));
+            splitter.setAttribute('aria-valuemax', Math.round(bounds.maximum * 100));
+            splitter.setAttribute('aria-valuenow', Math.round(leftRatio * 100));
+            splitter.setAttribute('aria-valuetext', `Metin genişliği yüzde ${Math.round(textRatio * 100)}`);
+            syncPdfViewer(section, state);
+        }
+    }
+
+    function syncPdfViewer(section, state) {
+        const wanted = currentSettings.pdfLayout !== 'text-only' &&
+            (currentSettings.readingMode !== 'paged' || Number(section.dataset.pageIndex) === currentPdfPage);
+        const column = section.querySelector('.pdf-page-image-column');
+        if (!wanted) {
+            state.viewer?.destroy();
+            state.viewer = null;
+            column.replaceChildren();
+        } else if (!state.viewer) {
+            state.viewer = new PdfPageViewer(column, currentPdfDoc, Number(section.dataset.pageIndex), {
+                zoom: pdfZoom, onZoom: zoom => {pdfZoom = zoom;}
+            });
+        } else state.viewer.schedule();
+    }
+
+    function setPdfSplitRatio(textRatio, anchor) {
+        currentSettings.pdfTextRatio = textRatio;
+        applyPdfLayout();
+        restorePdfReadingAnchor(anchor);
+    }
+
+    function finishPdfSplitDrag() {
+        const drag = pdfSplitDrag;
+        if (!drag) return;
+        pdfSplitDrag = null;
+        if (drag.splitter.hasPointerCapture(drag.pointerId)) drag.splitter.releasePointerCapture(drag.pointerId);
+        document.documentElement.classList.remove('pdf-split-dragging');
+        suppressPdfClickUntil = performance.now() + 350;
+        localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
+        pdfReadingAnchor = capturePdfReadingAnchor();
+        if (currentBookId) saveCurrentProgress();
+    }
+
+    bookContent.addEventListener('pointerdown', event => {
+        const splitter = event.target.closest('.pdf-splitter');
+        if (!splitter || event.button !== 0 || pdfSplitDrag) return;
+        event.preventDefault();
+        event.stopPropagation();
+        window.getSelection()?.removeAllRanges();
+        splitter.focus({preventScroll: true});
+        pdfSplitDrag = {splitter, pointerId: event.pointerId, anchor: capturePdfReadingAnchor()};
+        splitter.setPointerCapture(event.pointerId);
+        document.documentElement.classList.add('pdf-split-dragging');
+    });
+    bookContent.addEventListener('pointermove', event => {
+        if (!pdfSplitDrag || event.pointerId !== pdfSplitDrag.pointerId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const columns = pdfSplitDrag.splitter.parentElement;
+        const bounds = pdfSplitBounds(columns);
+        const left = (event.clientX - columns.getBoundingClientRect().left - 20) / bounds.width;
+        const textRatio = currentSettings.pdfLayout === 'text-left' ? left : 1 - left;
+        setPdfSplitRatio(Math.max(bounds.minimum, Math.min(bounds.maximum, textRatio)), pdfSplitDrag.anchor);
+    });
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+        bookContent.addEventListener(name, event => {
+            if (!pdfSplitDrag || event.pointerId !== pdfSplitDrag.pointerId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            finishPdfSplitDrag();
+        });
+    }
+    bookContent.addEventListener('click', event => {
+        if (event.target.closest('.pdf-splitter') || performance.now() < suppressPdfClickUntil) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+    }, true);
+    bookContent.addEventListener('keydown', event => {
+        const splitter = event.target.closest('.pdf-splitter');
+        if (!splitter || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const bounds = pdfSplitBounds(splitter.parentElement);
+        const textLeft = currentSettings.pdfLayout === 'text-left';
+        const left = textLeft ? currentSettings.pdfTextRatio : 1 - currentSettings.pdfTextRatio;
+        const next = event.key === 'Home' ? bounds.minimum : event.key === 'End' ? bounds.maximum
+            : left + (event.key === 'ArrowRight' ? 1 : -1) * (event.shiftKey ? 0.1 : 0.02);
+        const clamped = Math.max(bounds.minimum, Math.min(bounds.maximum, next));
+        setPdfSplitRatio(textLeft ? clamped : 1 - clamped, capturePdfReadingAnchor());
+        localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
+    });
+    const rememberPdfReadingAnchor = () => {
+        if (currentBookType === 'pdf' && !pdfSplitDrag) pdfReadingAnchor = capturePdfReadingAnchor();
+    };
+    window.addEventListener('scroll', rememberPdfReadingAnchor, {passive: true});
+    bookViewport.addEventListener('scroll', rememberPdfReadingAnchor, {passive: true});
+
     function disposePdfPage(section) {
         const state = pdfPageStates.get(section);
         if (!state) return;
         state.abort?.abort();
-        state.viewer.destroy();
+        state.viewer?.destroy();
         pdfPageStates.delete(section);
     }
 
@@ -1528,18 +2032,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function mountPdfPage(section) {
-        const pageNumber = Number(section.dataset.pageIndex);
-        const viewer = new PdfPageViewer(section.querySelector('.pdf-page-image-column'), currentPdfDoc, pageNumber, {
-            zoom: pdfZoom,
-            onZoom: zoom => {pdfZoom = zoom;}
-        });
-        pdfPageStates.set(section, {viewer, abort: null});
+        pdfPageStates.set(section, {viewer: null, abort: null});
+        applyPdfLayout();
         void hydratePdfPage(section);
     }
 
-    async function hydratePdfPage(section, forceOcr = false) {
+    async function hydratePdfPage(section, forceOcr = false, explicitJob = null) {
         const state = pdfPageStates.get(section);
-        if (!state || !section.isConnected) return;
+        if (!state || !section.isConnected || !currentPdfMetadata || ocrPolicyChanging) return;
         state.abort?.abort();
         const controller = new AbortController();
         state.abort = controller;
@@ -1554,53 +2054,82 @@ document.addEventListener('DOMContentLoaded', async () => {
         button.textContent = forceOcr ? 'OCR yeniden üretiliyor…' : 'Metin hazırlanıyor…';
         status.dataset.state = 'loading';
         status.removeAttribute('title');
-        status.textContent = (forceOcr ? 'Belge OCR yeniden üretiliyor' : 'PDF metni / belge OCR hazırlanıyor') +
-            ' · İlk kullanımda yerel model indirilip yüklenebilir; orijinal PDF gerçek zamanlı işlenir ve bağımsız olarak kullanılabilir.';
+        const wantsOcr = forceOcr || explicitJob || currentPdfMetadata.automaticOcr;
+        status.textContent = wantsOcr
+            ? readerRuntime.mode === 'vps'
+                ? 'OCR metni hazırlanıyor; arka plan kuyruğu ve kaynak PDF birbirinden bağımsızdır.'
+                : 'Yerel OCR metni hazırlanıyor; ilk kullanımda model yüklenebilir.'
+            : 'PDF’nin kendi metin katmanı okunuyor · OCR çalıştırılmıyor.';
         text.setAttribute('aria-busy', 'true');
         try {
-            const response = await authFetch('/api/books/' + encodeURIComponent(bookId) +
-                '/pdf/pages/' + pageNumber + (forceOcr ? '?ocr=1' : ''), {signal});
-            const result = await response.json();
-            if (!response.ok) throw new Error(result.error || 'PDF metni hazırlanamadı.');
+            const pageUrl = '/api/books/' + encodeURIComponent(bookId) + '/pdf/pages/' + pageNumber;
+            let result;
+            let regenerate = forceOcr;
+            let jobId = explicitJob;
+            while (true) {
+                const query = regenerate ? '?ocr=1' : jobId ? '?ocrJob=' + encodeURIComponent(jobId)
+                    : currentPdfMetadata.automaticOcr ? '' : '?ocr=0';
+                const response = await authFetch(pageUrl + query, {signal});
+                regenerate = false;
+                result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'PDF metni hazırlanamadı.');
+                signal.throwIfAborted();
+                if (response.status !== 202) break;
+                if (result.status === 'failed') throw new Error(result.error || 'Arka plan OCR işi başarısız oldu.');
+                if (!['pending', 'processing'].includes(result.status)) throw new Error('Geçersiz OCR kuyruk durumu.');
+                if (!result.jobId) throw new Error('OCR kuyruğu iş kimliği döndürmedi.');
+                jobId = result.jobId;
+                status.dataset.state = result.status;
+                status.textContent = (result.status === 'processing' ? 'OCR işleniyor' : 'OCR kuyrukta bekliyor') +
+                    (result.mode === 'compute' ? ' · Evde GPU worker’ını başlatın.' : ' · VPS arka planda çalışıyor.') +
+                    ' Kaynak PDF kullanılabilir; metin hazır olduğunda otomatik görünür.';
+                button.textContent = result.status === 'processing' ? 'OCR işleniyor…' : 'OCR kuyrukta…';
+                await waitForCompute(signal);
+            }
             signal.throwIfAborted();
             if (token !== session || pdfPageStates.get(section) !== state || !section.isConnected) return;
-            if (result.pipelineVersion !== 14) {
+            if (result.pipelineVersion !== PDF_PIPELINE_VERSION) {
                 text.replaceChildren();
                 delete section.dataset.textSource;
-                throw new Error('Eski veya uyumsuz yerel sunucu yanıtı (beklenen belge hattı: 14). Yerel sunucuyu yeniden başlatın, ardından OCR sonucunu yeniden üretin.');
+                throw new Error(`Uyumsuz sunucu yanıtı (beklenen belge hattı: ${PDF_PIPELINE_VERSION}). Sunucuyu yeniden başlatın, ardından OCR sonucunu yeniden üretin.`);
             }
             const qualityLimits = result.qualityLimits ?? [];
             if (!Array.isArray(qualityLimits) || qualityLimits.some(limit => typeof limit !== 'string' || !limit.trim())) {
                 throw new Error('Belge OCR kaynak doğruluğu uyarıları geçersiz.');
             }
-            const content = makePdfPageText(result);
-            const anchor = currentSettings.readingMode === 'scroll'
-                ? Array.from(bookContent.children).find(element => element.getBoundingClientRect().bottom > 100) : null;
-            const top = anchor?.getBoundingClientRect().top;
+            const content = makePdfPageText(result, await getAuthToken());
+            signal.throwIfAborted();
+            const anchor = capturePdfReadingAnchor();
             text.replaceChildren(...content.childNodes);
+            text.style.removeProperty('min-height');
+            text.setAttribute('aria-label', result.source === 'ocr' ? 'OCR ile tanınan metin' : 'PDF’nin kendi metin katmanı');
             section.dataset.textSource = result.source;
             status.dataset.state = qualityLimits.length ? 'warning' : 'ready';
             const metadata = [result.engine, result.device,
                 result.modelRevision ? 'Model: ' + result.modelRevision.split(':').map(revision => revision.slice(0, 8)).join(':') : null,
                 Number.isFinite(result.elapsedMs) ? (result.elapsedMs / 1000).toFixed(1) + ' sn' : null].filter(Boolean);
             status.title = [result.engine, result.device, result.modelRevision, ...qualityLimits].filter(Boolean).join('\n');
-            status.textContent = (result.source === 'ocr' ? 'Yerel belge OCR' : 'PDF metni') +
+            const nativeText = result.source === 'native'
+                ? (result.text ?? result.blocks.map(block => block.text || '').join(' ')).trim() : '';
+            status.textContent = (result.source === 'ocr'
+                ? readerRuntime.mode === 'vps' ? 'OCR ile tanınan metin · VPS önbelleği' : 'Yerel OCR ile tanınan metin'
+                : !nativeText ? 'PDF’nin kendi metin katmanı · Bu sayfada metin yok; otomatik OCR başlatılmadı.'
+                    : nativeText.length < 100 ? 'PDF’nin kendi metin katmanı · Bu sayfada kısa metin var; otomatik OCR başlatılmadı.'
+                        : 'PDF’nin kendi metin katmanı') +
                 (metadata.length ? ' · ' + metadata.join(' · ') : '') +
                 (qualityLimits.length ? ` · ${qualityLimits.length} bölgede matematik eşleşmesi belirsiz; kaynakla karşılaştırın.` :
                     result.source === 'ocr' ? ' · Tanıma hataları olabilir; kaynakla karşılaştırın.' : '');
-            if (anchor?.isConnected && anchor !== section && !isNavigatingPage) {
-                window.scrollBy({top: anchor.getBoundingClientRect().top - top, behavior: 'instant'});
-            }
+            if (!isNavigatingPage && !pdfSplitDrag) restorePdfReadingAnchor(anchor);
         } catch (error) {
             if (signal.aborted || token !== session || !section.isConnected) return;
             console.error('PDF metni hazırlanamadı:', error);
             status.dataset.state = 'error';
             status.textContent = 'Metin hazırlanamadı: ' + error.message + ' · OCR düğmesiyle yeniden deneyebilirsiniz.';
         } finally {
-            if (state.abort === controller && section.isConnected && pdfPageStates.get(section) === state) {
+            if (state.abort === controller && !ocrPolicyChanging && section.isConnected && pdfPageStates.get(section) === state) {
                 text.setAttribute('aria-busy', 'false');
                 button.disabled = false;
-                button.textContent = 'Bu sayfanın OCR sonucunu yeniden üret';
+                button.textContent = 'Bu sayfayı OCR yap / yeniden üret';
             }
         }
     }
@@ -1624,31 +2153,40 @@ document.addEventListener('DOMContentLoaded', async () => {
         button.type = 'button';
         button.className = 'mode-btn';
         button.dataset.pdfOcr = pageNumber;
-        button.textContent = 'Bu sayfanın OCR sonucunu yeniden üret';
+        button.textContent = 'Bu sayfayı OCR yap / yeniden üret';
         tools.append(status, button);
         const text = document.createElement('div');
         text.className = 'pdf-page-text';
+        text.id = 'pdf-text-' + pageNumber;
         text.setAttribute('aria-label', 'Çıkarılan metin');
+        text.setAttribute('role', 'region');
         const comparison = document.createElement('div');
         comparison.className = 'pdf-page-comparison';
         const columns = document.createElement('div');
         columns.className = 'pdf-page-columns';
         const imageColumn = document.createElement('div');
         imageColumn.className = 'pdf-page-image-column';
-        columns.append(imageColumn, text);
+        const splitter = document.createElement('div');
+        splitter.className = 'pdf-splitter';
+        splitter.tabIndex = 0;
+        splitter.setAttribute('role', 'separator');
+        splitter.setAttribute('aria-orientation', 'vertical');
+        splitter.setAttribute('aria-label', 'PDF ve metin sütunu genişlikleri');
+        splitter.setAttribute('aria-controls', text.id);
+        columns.append(imageColumn, splitter, text);
         comparison.appendChild(columns);
         section.append(tools, comparison);
         return section;
     }
 
-    function makePdfPageText(result) {
+    function makePdfPageText(result, assetToken) {
         const text = document.createElement('div');
         for (const block of result.blocks) {
             if (block.type === 'image') {
                 const figure = document.createElement('figure');
                 figure.className = 'pdf-figure';
                 const graphic = document.createElement('img');
-                graphic.src = block.imageUrl;
+                graphic.src = authenticatedAsset(block.imageUrl, assetToken);
                 graphic.width = block.width;
                 graphic.height = block.height;
                 graphic.alt = block.alt;
@@ -1671,6 +2209,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             const p = document.createElement('p');
             p.className = 'pdf-text-block';
+            if (block.preserveWhitespace) p.dataset.preserveWhitespace = 'true';
             p.dataset.ttsText = block.text;
             for (const run of block.runs) {
                 if (run.type === 'math') {
@@ -1679,6 +2218,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 const span = document.createElement('span');
                 span.style.fontSize = run.fontScale + 'em';
+                if (result.source === 'native') {
+                    if (run.fontFamily) span.style.fontFamily = run.fontFamily;
+                    if (run.fontStyle) span.style.fontStyle = run.fontStyle;
+                    if (run.fontWeight) span.style.fontWeight = run.fontWeight;
+                    if (run.fontName) span.dataset.sourceFont = run.fontName;
+                }
                 span.textContent = run.text;
                 p.appendChild(span);
             }
@@ -1686,7 +2231,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         if (!text.children.length) {
             const notice = document.createElement('div');
-            notice.textContent = 'Metin tespit edilemedi; orijinal PDF yanındaki gerçek renderer ile kullanılabilir.';
+            notice.className = 'pdf-empty-text';
+            notice.textContent = result.source === 'native'
+                ? 'Bu sayfanın yerleşik PDF metni boş. Kapak veya görsel sayfası olabilir. OCR gerekiyorsa “Bu sayfayı OCR yap” düğmesini kullanın.'
+                : 'OCR bu sayfada okunabilir metin bulamadı. Kaynak PDF’yi inceleyebilir veya sayfayı yeniden OCR yapabilirsiniz.';
             text.appendChild(notice);
         }
         return text;
@@ -1973,6 +2521,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     function startTTS() {
         ttsActive = true;
         prepareTextForTTS();
+        if (!ttsSentences.length && currentBookType === 'pdf') {
+            ttsActive = false;
+            alert('Bu sayfanın metni henüz hazır değil. OCR tamamlandığında sesli okumayı başlatabilirsiniz.');
+            return;
+        }
         loadVoices();
         ttsPlayerCard.classList.add('active');
         

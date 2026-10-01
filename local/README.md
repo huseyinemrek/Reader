@@ -26,12 +26,11 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
    npm install
    ```
 
-2. Kimlik Doğrulama (Firebase Auth) Yapılandırması:
-   Sunucuyu güvenli çalıştırmak için Firebase Auth yapılandırmasını hazırlayın:
+2. `.env.example` dosyasını `.env` olarak kopyalayın. Kaynak kod düzenlemek gerekmez:
    ```bash
-   cp firebase-config.example.js firebase-config.js
+   cp .env.example .env
    ```
-   `firebase-config.js` dosyasını kendi Firebase Konsolunuzdaki Web App ayarlarıyla doldurun. Alternatif olarak `.env.example` dosyasını `.env` olarak kopyalayıp `FIREBASE_PROJECT_ID=YOUR_PROJECT_ID` belirtebilirsiniz.
+   Firebase kullanacaksanız `FIREBASE_PROJECT_ID`, `FIREBASE_API_KEY`, `FIREBASE_APP_ID` ve ilgili diğer alanları kendi projenize göre doldurun. Firebase yapılandırması yoksa tek kullanıcılı yerel mod kullanılır. Önceden oluşturulmuş `firebase-config.js` dosyaları da okunur. `DISABLE_AUTH=true` yalnız güvenilir ev/LAN kullanımı içindir.
 
 3. PDF OCR kullanacaksanız ortamı ve modelleri hazırlayın (isteğe bağlı):
    ```bash
@@ -48,40 +47,38 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
 
 5. Tarayıcınızda açın:
    - Bilgisayarınızdan: `http://localhost:3000`
-   - VPS / Uzak Sunucudan: `http://<SENIN_VPS_IP>:3000`
+   - Aynı yerel ağdan: `http://<YEREL_IP>:3000`
 ---
 
-## ☁️ VPS & GitHub Actions ile Otomatik Dağıtım (CI/CD)
+## VPS sürümü
 
-Okuyucuyu 7/24 çalışan bir VPS (örn. Oracle Cloud Ampere A1, Ubuntu VPS vb.) üzerinde otomatik dağıtmak için:
+İnternete açık, 7/24 kullanım ve isteğe bağlı ev GPU worker için [vps/README.md](../vps/README.md) kullanın. VPS sürümü yerel sürümün tüm okuyucu özelliklerini ve kendi CPU OCR motorunu korur; ağır sayfalar kalıcı bir arka plan kuyruğunda işlenir. Ev worker seçilmesi ek bir özelliktir, VPS OCR’nin yerine geçmez.
 
-1. **VPS Hazırlığı:**
-   ```bash
-   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-   sudo apt-get install -y nodejs git
-   sudo npm install -g pm2
-   git clone <REPO_URL> ~/reader
-   cd ~/reader/local
-   cp firebase-config.example.js firebase-config.js # Bilgilerinizi girin
-   npm install --omit=dev
-   pm2 start server.js --name reader
-   pm2 save
-   pm2 startup
-   ```
+Mevcut `local/` kitapları ve önbellekleri yerinde kalır; VPS’ye taşıma kılavuzundaki kopyalama adımları özgün veriyi silmez. GitHub Actions artık `vps/` giriş noktasını kullanır.
 
-2. **GitHub Repository Secrets Tanımlama:**
-   GitHub deponuzda **Settings -> Secrets and variables -> Actions** bölümüne gidin:
-   - `VPS_HOST`: `<SENIN_VPS_IP>`
-   - `VPS_USER`: `<SENIN_SSH_KULLANICI_ADIN>` (örn. `ubuntu` veya `opc`)
-   - `VPS_SSH_KEY`: VPS SSH Özel Anahtarı (`-----BEGIN OPENSSH PRIVATE KEY----- ...`)
-   - `VPS_PORT`: `22` (isteğe bağlı, varsayılan 22)
+## EPUB görselleri ve kitap kaynakları
 
-3. Artık depoya her `git push origin main` yaptığınızda GitHub Actions otomatik olarak sunucunuza bağlanıp uygulamayı günceller ve yeniden başlatır.
+EPUB içindeki görsel, SVG bağlantısı, CSS arka planı ve font yolu kendi bölüm/stylesheet konumuna göre çözülür. Firebase oturumu kullanılıyorsa korumalı aynı-origin EPUB kaynaklarına güncel kullanıcı token’ı eklenir; bu davranış hem yerel hem VPS modunda geçerlidir. Dış originlere token veya Authorization başlığı gönderilmez. SVG’nin `#fragment` bağlantıları korunur; stylesheet önbelleği token içermeyen kaynak CSS’yi saklar.
+
 ## PDF ve OCR
 
-PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Orijinal sayfa tarayıcıda PDF.js ile doğrudan PDF kaynağından çizilir; OCR sonucunu beklemez. Yakınlaştırma düğmeleriyle %500'e kadar büyütebilir, sayfaya sığdırabilir ve görüntüyü kaydırabilirsiniz. Görünen alan cihaz piksel oranında yeniden çizilir; her çizim parçası en fazla 1024 × 1024 fiziksel pikseldir. Kaynak PDF taranmış bir fotoğrafsa renderer kaybolmuş ayrıntıları geri getiremez. Seçilebilir metin sağda hazırlanır; dar ekranlarda karşılaştırma alanı yatay kaydırılır.
+PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Orijinal sayfa tarayıcıda PDF.js ile doğrudan PDF kaynağından çizilir; OCR sonucunu beklemez. Yakınlaştırma düğmeleriyle %500'e kadar büyütebilir, sayfaya sığdırabilir ve görüntüyü kaydırabilirsiniz. Görünen alan cihaz piksel oranında yeniden çizilir; her çizim parçası en fazla 1024 × 1024 fiziksel pikseldir. Kaynak PDF taranmış bir fotoğrafsa renderer kaybolmuş ayrıntıları geri getiremez.
 
-En az 200 harf/rakam içeren, bozuk karakter barındırmayan PDF metni doğrudan kullanılır. Metin yoksa veya yalnızca kısa grafik etiketleri varsa yerel belge OCR hattı çalışır. **Bu sayfayı OCR ile oku** düğmesi mevcut sonucu atlayarak sayfayı yeniden işler; değişmemiş bölge görüntüleri model önbelleğinden kullanılabilir.
+**Ayarlar → PDF Görünümü** üç düzen sunar: **Yalnız metin**, **Metin sağda + PDF solda**, **Metin solda + PDF sağda**. İki sütun arasındaki ayırıcıyı fare/dokunmayla sürükleyin; odaklanan ayırıcı sol/sağ okları, Shift ile daha büyük adımları ve Home/End sınırlarını da destekler. Görünüm ve metin genişliği tarayıcıda saklanır; sayfa geçişi ve yeniden açma oranı korur. Dar ekranda yalnız metin görünümü yatay karşılaştırma genişliğini zorlamaz.
+
+Yerleşik PDF metninde italik/oblik, font ağırlığı ve göreli boyut farkları metin parçalarıyla korunur. Kullanıcının seçtiği font, renk ve temel boyut override’ları geçerli kalır; kaynak vurgu bu seçilmiş stilin üzerine uygulanır, kaynak font zorla dayatılmaz. Font bilgisi bulunmayan taranmış/vektör gövdeli OCR çıktısında italik veya font adı tahmin edilmez.
+
+**İçindekiler** PDF’nin yer işaretlerinden doğrudan yüklenir; alt başlıklar ve adlandırılmış/sayfa referanslı hedefler korunur. Bağlantı doğru PDF sayfasına gider. Kaynak PDF’de yer işareti kaydı yoksa bu açıkça belirtilir; uydurma bölüm listesi üretilmez.
+
+PDF türü kapaktan değil **kitap düzeyinde** belirlenir: boş/görsel başlangıç sayfalarından sonra gelen metin de incelenir. Yerleşik paragraf, kısa cümle veya grafik çizimleri içermeyen kısa dijital metin bulunduğunda kitap yerleşik metinle okunur. Vektör çizimine dönüşmüş gövde ve yalnız grafik etiketleri OCR gerektirir. Sınıflandırma PDF kaynağına ve sınıflandırıcı sürümüne bağlı önbelleğe alınır; model yüklemez veya sayfa rasterleştirmez.
+
+**Ayarlar → Bu kitap için OCR** tercihi kitapla birlikte kaydedilir:
+
+- **Otomatik:** Yerleşik metinli kitapta OCR çalışmaz; boş kapak olduğu gibi gösterilir. Taranmış/vektör gövdeli kitapta ziyaret edilen sayfalar OCR kullanır.
+- **Açık:** Yerleşik metin bulunsa bile ziyaret edilen sayfalar OCR kullanır.
+- **Kapalı:** Yalnız PDF’nin kendi metni gösterilir; hazır OCR önbelleği de bu tercihi geçersiz kılamaz. Bekleyen/işlenen OCR nesilleri iptal edilir.
+
+**Geçerli sayfayı OCR yap / yeniden üret** veya sayfadaki aynı düğme, **Kapalı** seçiliyken bile yalnız o sayfa için açık istek gönderir; kitap tercihini değiştirmez. Sayfa yeniden açıldığında kitap tercihi yeniden geçerlidir. Karma kitapların görsel sayfalarında da bu düğmeyi kullanabilirsiniz. Yerel **Açık** tüm ziyaret edilen sayfaları yerel motorla işler; VPS’de tüm kitap/sayfa aralığı hazırlama ayrıca ayarlardaki panelden yapılır.
 
 ### Yapı önce, uygun büyüklükte pencereler sonra
 
@@ -91,19 +88,22 @@ En az 200 harf/rakam içeren, bozuk karakter barındırmayan PDF metni doğrudan
 4. GLM-OCR aynı kalıcı süreçte `Text Recognition:` ve `Formula Recognition:` görevleriyle parçaları okur. En fazla dört pencere birlikte işlenir; aynı görüntü/görev/model sonucu sınırlı bölge önbelleğinden kullanılır.
 5. Paragraf içindeki küçük formül pencereleri ayrı LaTeX çağrılarıyla okunur. Sonuç ancak özgün metindeki matematik aralığıyla güvenli eşleşiyorsa o konuma yerleştirilir; noktalama ve çevredeki metin korunur. Belirsiz eşleşmede sembol veya konum tahmin edilmez; mevcut paragraf korunur ve arayüzde kaynak karşılaştırma uyarısı gösterilir.
 
-Metin, satır içi matematik, numaralı denklemler ve algoritma satırları ayrı seçilebilir öğelerdir. LaTeX KaTeX ile çizilir ve kopyalanabilir; denklem karakterleri sesli okuma metnine eklenmez. Grafik ve tablolar kaynak görüntü olarak korunur; tablo hücrelerini semantik HTML'ye dönüştürme desteği yoktur. PDF metin katmanındaki font oranları gerçek kaynak ölçülerinden gelir; OCR çıktısı gerçek PDF font metrikleri değildir.
+Metin, satır içi matematik, numaralı denklemler ve algoritma satırları ayrı seçilebilir öğelerdir. Fiziksel OCR satırları paragraf içinde boşlukla birleştirilir; paragraf sınırları, algoritma/kod girintileri ve açık satır yapısı korunur. Bu davranış seçilebilir metin ve sesli okuma metnine de uygulanır. LaTeX KaTeX ile çizilir ve kopyalanabilir; açık çok sözcüklü `\mathrm` metinleri sözcük aralıklarını korur, matematiksel çarpımlar değiştirilmez. Denklem karakterleri sesli okuma metnine eklenmez. Grafik ve tablolar kaynak görüntü olarak korunur; tablo hücrelerini semantik HTML’ye dönüştürme desteği yoktur. OCR çıktısı gerçek PDF font metrikleri değildir.
 
 - Belgeler buluta gönderilmez. Sabit sürümlü GLM-OCR ve PP-DocLayoutV3 modelleri ilk hazırlamada indirilir; hazır modellerle yerel çıkarım yapılır.
 - Sayfalar ihtiyaç oldukça işlenir. Kalıcı model süreci ve tek işlem kuyruğu yeniden model yüklemeyi önler; hazır sayfa önbelleği bu kuyruğu beklemez.
-- Sonuçlar `uploads/pdf/<kitap-id>/page-<N>-v14.*` altında saklanır. Eski işlem hatlarının önbelleği yeniden kullanılmaz; sürümlü dosya adları eski sunucu süreçlerinin sonuçlarıyla çakışmaz. Kitap silinince ilgili önbellek de silinir.
-- `GET /api/books/:id/pdf/pages/:page` seçilebilir `blocks`, kaynak (`native`/`ocr`), `engine`, `device`, `modelRevision`, `elapsedMs`, `pipelineVersion`, `metrics`, `qualityLimits` ve kaynak görsel adresini döndürür. `?ocr=1` yeniden çıkarım ister. GLM için `confidence` değeri `null`dır; uydurma doğruluk yüzdesi verilmez.
+- Sonuçlar `uploads/pdf/<kitap-id>/page-<N>-v15.*` altında saklanır. Eski işlem hatlarının önbelleği yeniden kullanılmaz; sürümlü dosya adları eski sunucu süreçlerinin sonuçlarıyla çakışmaz. Kitap silinince ilgili önbellek de silinir.
+- `GET /api/books/:id/pdf` → `{totalPages,sourceVersion,textLayer:'native'|'scanned',ocrMode:'auto'|'on'|'off',automaticOcr}`. `POST /api/books/:id/pdf/ocr` gövdesi `{mode:'auto'|'on'|'off'}` kitap tercihini kaydeder ve güncel tanımı döndürür.
+- `GET /api/books/:id/pdf/pages/:page` seçilebilir `blocks`, kaynak (`native`/`ocr`), `engine`, `device`, `modelRevision`, `elapsedMs`, `pipelineVersion`, `metrics`, `qualityLimits` döndürür. OCR sonuçları kaynak görsel adresini de içerir; yerleşik metin okuması görsel üretmez. `?ocr=0` yalnız yerleşik metni, `?ocr=1` açık yeniden çıkarımı ister. VPS’de dönen `jobId` için `?ocrJob=<id>` aynı nesli izler; iptal edilen/değiştirilen iş 410 döndürür. GLM için `confidence` değeri `null`dır; uydurma doğruluk yüzdesi verilmez.
 - OCR kusursuz değildir: geçerli LaTeX doğru denklem garantisi vermez. Küçük semboller, grafik etiketleri ve karmaşık düzen için orijinal sayfa esas alınmalıdır. GLM'nin model kartı Türkçe için ayrı doğruluk garantisi sunmaz.
 
-Bu destek yalnızca `local/` sürümündedir; Firebase hosting tarafı değişmez.
+Ortak OCR motoru `local/`, `vps/` ve isteğe bağlı `compute/` tarafından kullanılır; Firebase `hosting/` sürümü değişmez.
 
 ### GPU kullanımı
 
 Metin ve formül tanıma aynı GLM-OCR modelini kullanır. `OCR_DEVICE=auto` kullanılabilir CUDA GPU'yu, yoksa CPU'yu seçer. CUDA yolunda BF16/SDPA, CPU yolunda FP32/SDPA kullanılır; CPU iş parçacığı sayısı en fazla dörttür. `cuda` GPU'yu zorunlu kılar ve başlatma hatasını gizlemez; `cpu` GPU kullanımını kapatır. Seçilen cihaz ve model sürümü sonuçla birlikte arayüzde görünür.
+
+`OCR_REQUEST_TIMEOUT_MS` yavaş CPU sayfaları için model isteği süresini ayarlar; örnek değer 30 dakikadır. VPS’de bu süre boyunca HTTP isteği açık kalmaz. Yerel sürüm aynı makinede tamamlanan sonucu doğrudan döndürür.
 
 ```powershell
 $env:OCR_DEVICE = "cuda"
@@ -125,3 +125,42 @@ Kaynak pencere sınırlarını, yerel PDF metnini ve karma metin/LaTeX sözleşm
 ```bash
 npm test
 ```
+
+### RLbook2018 ile bu değişikliğin doğrulaması
+
+Yerel kütüphanedeki RLbook2018 örneğinin 3, 4, 8 ve 11. PDF sayfaları gerçek CUDA OCR ile yeniden işlendi. Normal paragrafların fiziksel satırları birleştirildi; algoritma satırları ve girintileri korundu. (2.1) kesrindeki uzun sözcüklü metin, aynı kaynak penceresinden bağlamlı metin göreviyle yeniden okunarak doğal sözcük aralıklarıyla çizildi.
+
+11. sayfadaki (2.10) kökü OCR LaTeX'inde zaten vardı. Sayfalı okuyucunun genel SVG boyutlandırması KaTeX kökünü de küçültüyordu; KaTeX SVG'leri bu kuraldan çıkarıldı. Aynı tarayıcı görünümünde eski kuralla 0,67 px olan kök yüksekliği düzeltilmiş kuralla 73,9 px oldu. Hem kaydırmalı hem sayfalı görünümde kontrol edildi; denkleme kitaba özel bir kök eklenmedi.
+
+Gerçek Oracle Ubuntu 26.04 ARM64 VPS'ye taşınan mevcut 12 sayfalık kitap, evdeki RTX 4070 SUPER işçisi tarafından şifreli outbound SSH üzerinden yaklaşık 128 saniyede tamamlandı. Her sayfanın OCR süresi 5,4–14,9 saniyeydi; kuyruk 12 `completed`, sıfır `pending/processing/failed` durumuna geldi ve işçi `204` yanıtında kapandı. Bunlar bu kitap ve donanım için ölçümlerdir, genel performans garantisi değildir. Ortak davranış testlerinin 50'si geçti.
+
+Aynı gerçek Ampere VPS'de, metin katmanı olmayan ayrı tek satırlık taranmış PDF CPU yolundan da işlendi: ilk sayfa isteği 60 ms'de `202 pending` döndü, tamamlanınca `200` ve `CPU FP32 SDPA` metadata ile `CPU OCR is available.` metni geldi. Arayüzde kaynak görüntü ve seçilebilir sonuç birlikte görüldü; çıkarım metadata süresi 11,6 saniyeydi. Bu küçük CPU smoke dosyası, RLbook2018 sayfa süresi ölçümü değildir.
+
+### Kitap düzeyinde OCR ve PDF düzeni doğrulaması
+
+Gerçek Circe PDF’sinin ilk beş sayfası boş/görsel olmasına rağmen kitap yerleşik metinli tanındı; kapak OCR işi oluşturmadı ve 9. sayfadaki bölüm PDF metninden okundu. Tek sayfalık 19 karakterlik dijital PDF de OCR’sız okundu. RLbook2018 taranmış/vektör gövdeli tanındı ve otomatik OCR varsayılanını korudu.
+
+Gerçek tarayıcıda ayarlar içindeki hazırlama paneli, üç düzen, iki yönde fare sürüklemesi, klavye ayarı, yeniden açmada oran, sayfalı/kaydırmalı okumada sayfa konumu ve 390 px ekranda yalnız metin görünümü kontrol edildi. OCR kapalıyken tek sayfa GPU isteği tamamlandı; yeniden açma hazır OCR yerine yerleşik metne döndü. İzole VPS giriş noktasından bütün kitap kapsamıyla gönderilen tek sayfalık tarama CPU FP32 yolunda `A scanned reading page.` olarak tamamlandı. Ortak davranış testlerinin 55’i geçti.
+
+### EPUB görsel, PDF vurgu ve içindekiler regresyonları
+
+Gerçek Firebase oturumuyla bağımsız local ve VPS giriş noktalarında ReZero 28 kapağı yüklendi; token’lı EPUB görseli 200, kimliksiz aynı kaynak 401 döndürdü. Sapiens’in bölüm içindeki `f079-01.jpg` görseli de korumalı kaynaktan çizildi. Circe’nin 36 yer işareti yüklendi; 9. sayfadaki italik sözcükler kullanıcı fontuyla korundu. İç içe PDF yer işaretinden 3. sayfaya geçiş ve kullanıcının Inter / 32 px / özel renk seçimine rağmen italik-kalın vurgunun korunması gerçek tarayıcıda kontrol edildi. Ortak davranış testlerinin 60’ı geçti.
+
+### Commit öncesi kalıcı regresyon kontrolü
+
+Özgün, küçük PDF vakaları `../tests/fixtures/` altında saklanır; kişisel kitaplar ve Firebase kimlik bilgileri bu vakalara dahil değildir. `typography-outline.pdf` normal/italik/oblik/kalın/monospace metin, büyük başlık, küçük dipnot, iç içe yer işaretleri ve adlandırılmış hedef içerir. `without-outline.pdf` yer işareti olmayan sınırı kontrol eder. PDF’ler doğrudan test verisidir; testleri çalıştırmak için Python veya OCR modeli gerekmez. `create-pdf.py` yalnız yeniden üretmek içindir ve PyMuPDF gerektirir.
+
+Depo kökünden ilk kurulum:
+
+```sh
+npm --prefix local ci
+npm --prefix local exec -- puppeteer browsers install chrome
+```
+
+Her commit öncesi:
+
+```sh
+npm --prefix local run check
+```
+
+`check`, mevcut Node davranış testlerini ve `tests/reader.test.cjs` gerçek Chromium okuyucu kontrollerini birlikte çalıştırır. Yalnız tarayıcı vakaları için `npm --prefix local run test:reader` kullanın. Her iki giriş noktası ayrı geçici veri dizininde ve yalnız `127.0.0.1` üzerinde açılır; gerçek kütüphane ve üretim doğrulaması değiştirilmez. Font/renk/boyut override’ları, yeniden açmada korunmaları, sözcük düzeyinde vurgu, göreli boyutlar ve doğru içindekiler hedefleri kontrol edilir. Başarısızlık sıfır olmayan çıkış kodu verir. Gözlenen son sonuç: 60 davranış testi ve 8 tarayıcı senaryosu (Node raporunda iki üst testle birlikte 10 test), tamamı geçti. VPS üretim kurulumunda `--omit=dev` korunur; Puppeteer ve Chromium üretim OCR bağımlılığı değildir.

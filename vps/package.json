@@ -1,0 +1,17 @@
+{
+  "name": "edge-reader-vps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Persistent VPS OCR queue using the shared Reader backend and UI",
+  "main": "server.js",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "deps": "npm --prefix ../local ci --omit=dev",
+    "ocr:setup": "npm --prefix ../local run ocr:setup:cpu",
+    "migrate": "node migrate-local.js",
+    "test": "node --test ../local/ocr-queue.test.js"
+  }
+}

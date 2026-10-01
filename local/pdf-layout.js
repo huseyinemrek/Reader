@@ -3,6 +3,7 @@
 // Geometry is processing-only: cached/client blocks contain the public contract,
 // while region recognition can still address individual source glyphs.
 const sourceLines = new WeakMap();
+const FONT_FIELDS = ['fontName', 'fontFamily', 'fontStyle', 'fontWeight'];
 
 function median(samples) {
     if (!samples.length) return null;
@@ -57,8 +58,11 @@ function nativeBlocks(content, viewport) {
             lines.push(line);
         }
         const needsSpace = line.parts.length && (bbox.x0 - line.bbox.x1 > size * 0.08 || /^\s/u.test(item.str) || /\s$/u.test(previousItem.str));
-        const part = { text: `${needsSpace ? ' ' : ''}${text}`, size, bbox, fontName: style.sourceFontName || item.fontName,
-            fontFamily: style.fontFamily || '' };
+        const part = { text: `${needsSpace ? ' ' : ''}${text}`, size, bbox };
+        for (const key of FONT_FIELDS) {
+            const value = key === 'fontName' ? style.sourceFontName : style[key];
+            if (value !== undefined && value !== '') part[key] = value;
+        }
         line.parts.push(part);
         line.text += part.text;
         line.bbox = union(line.bbox, bbox);
@@ -107,26 +111,41 @@ function layoutBlocks(lines) {
     return groups.map(group => {
         const runs = [];
         let bbox = group[0].bbox;
-        const append = (text, size) => {
+        const append = (text, size, typography) => {
             if (!text) return;
             const fontScale = Math.round(size / reference * 1000) / 1000;
             const previous = runs[runs.length - 1];
-            if (previous && previous.fontScale === fontScale) previous.text += text;
-            else runs.push({ type: 'text', text, fontScale });
+            if (previous && previous.fontScale === fontScale && FONT_FIELDS.every(key => previous[key] === typography[key])) previous.text += text;
+            else {
+                const run = { type: 'text', text, fontScale };
+                for (const key of FONT_FIELDS) if (typography[key] !== undefined) run[key] = typography[key];
+                runs.push(run);
+            }
         };
         group.forEach((line, index) => {
             bbox = union(bbox, line.bbox);
             if (index) {
                 const previous = runs[runs.length - 1];
-                const ending = previous.text.match(/([\p{L}]+)([-\u00ad])$/u);
+                const ending = previous.text.match(/([\p{L}]*)([-\u00ad])$/u);
+                if (ending && ending.index === 0) {
+                    for (let runIndex = runs.length - 2; runIndex >= 0; runIndex -= 1) {
+                        const tail = runs[runIndex].text.match(/[\p{L}]+$/u);
+                        if (!tail) break;
+                        ending[1] = tail[0] + ending[1];
+                        if (tail.index > 0) break;
+                    }
+                }
                 const beginning = line.parts[0].text.match(/^([\p{Ll}]+)/u);
-                if (ending && beginning) {
+                if (ending && ending[1] && beginning) {
                     const joined = (ending[1] + beginning[1]).toLowerCase();
                     const compound = `${ending[1]}-${beginning[1]}`.toLowerCase();
-                    if (ending[2] === '\u00ad' || vocabulary.has(joined) && !vocabulary.has(compound)) previous.text = previous.text.slice(0, -1);
-                } else append(' ', line.size);
+                    if (ending[2] === '\u00ad' || vocabulary.has(joined) && !vocabulary.has(compound)) {
+                        previous.text = previous.text.slice(0, -1);
+                        if (!previous.text) runs.pop();
+                    }
+                } else append(' ', line.size, line.parts[0]);
             }
-            for (const part of line.parts) append(part.text, part.size);
+            for (const part of line.parts) append(part.text, part.size, part);
         });
         const block = { type: 'text', text: runs.map(run => run.text).join(''), bbox, runs };
         sourceLines.set(block, { lines: group, reference });
@@ -165,7 +184,11 @@ function validBlocks(blocks, text) {
         return block.type === 'text' && typeof block.text === 'string' && validBbox(block.bbox) &&
             Array.isArray(block.runs) && block.runs.length > 0 && block.runs.every(run =>
                 run && (validMath(run, false) || run.type === 'text' && typeof run.text === 'string' &&
-                    run.text.length > 0 && Number.isFinite(run.fontScale) && run.fontScale > 0)) &&
+                    run.text.length > 0 && Number.isFinite(run.fontScale) && run.fontScale > 0 &&
+                    (run.fontName === undefined || typeof run.fontName === 'string' && run.fontName.trim().length > 0 && !/^g_d\d+_f/u.test(run.fontName)) &&
+                    (run.fontFamily === undefined || typeof run.fontFamily === 'string' && run.fontFamily.trim().length > 0) &&
+                    (run.fontStyle === undefined || ['normal', 'italic', 'oblique'].includes(run.fontStyle)) &&
+                    (run.fontWeight === undefined || Number.isFinite(run.fontWeight) && run.fontWeight >= 1 && run.fontWeight <= 1000))) &&
             block.runs.filter(run => run.type === 'text').map(run => run.text).join('') === block.text;
     }) && blocksText(blocks) === text;
 }

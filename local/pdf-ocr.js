@@ -3,8 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
+const crypto = require('crypto');
 const { nativeBlocks, blocksText, validBlocks } = require('./pdf-layout');
-const { processRegions } = require('./pdf-regions');
 const createDocumentOcr = require('./document-ocr');
 const { documentBlocks } = require('./document-blocks');
 const { createSourceWindowRenderer } = require('./pdf-windows');
@@ -12,11 +12,82 @@ const { createSourceWindowRenderer } = require('./pdf-windows');
 const requireFromHere = createRequire(__filename);
 const MAX_RENDER_DIMENSION = 3200;
 const BASE_RENDER_SCALE = 2.5;
-const MIN_NATIVE_ALPHANUMERIC_CHARS = 200;
-const CACHE_VERSION = 14;
+const CACHE_VERSION = 15;
+const CLASSIFIER_VERSION = 2;
 const PDFJS_PACKAGE_DIR = path.dirname(requireFromHere.resolve('pdfjs-dist/package.json'));
 const STANDARD_FONT_DATA_URL = `${path.join(PDFJS_PACKAGE_DIR, 'standard_fonts').replace(/\\/g, '/')}/`;
 const CMAP_URL = `${path.join(PDFJS_PACKAGE_DIR, 'cmaps').replace(/\\/g, '/')}/`;
+
+function nativeFontStyle(font) {
+    const name = font.name;
+    const css = font.cssFontInfo;
+    let weight;
+    let italic = false;
+    let oblique = false;
+    const data = font.data;
+    // PDF.js retains repaired SFNT tables with fontExtraProperties enabled.
+    // CFF conversion synthesizes OS/2 weight 500, so never use that as source weight.
+    if (data instanceof Uint8Array && data.byteLength >= 12) {
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const count = view.getUint16(4);
+        if (12 + count * 16 <= data.byteLength) {
+            const cff = view.getUint32(0) === 0x4f54544f;
+            for (let index = 0; index < count; index += 1) {
+                const record = 12 + index * 16;
+                const tag = view.getUint32(record);
+                const offset = view.getUint32(record + 8);
+                const length = view.getUint32(record + 12);
+                if (offset + length > data.byteLength) continue;
+                if (tag === 0x4f532f32 && length >= 64) { // OS/2
+                    const value = view.getUint16(offset + 4);
+                    if (!cff && value >= 1 && value <= 1000) weight = value;
+                    const selection = view.getUint16(offset + 62);
+                    italic ||= !!(selection & 1);
+                    oblique ||= !!(selection & 512);
+                } else if (tag === 0x68656164 && length >= 46) { // head
+                    italic ||= !!(view.getUint16(offset + 44) & 2);
+                } else if (tag === 0x706f7374 && length >= 8) { // post
+                    italic ||= view.getInt32(offset + 4) !== 0;
+                }
+            }
+        }
+    }
+    const cssWeight = Number(css?.fontWeight);
+    if (cssWeight >= 1 && cssWeight <= 1000) weight = cssWeight;
+    if (weight === undefined) {
+        if (font.black || /black|heavy/iu.test(name)) weight = 900;
+        else if (/(?:extra|ultra)[ -]?bold/iu.test(name)) weight = 800;
+        else if (/(?:semi|demi)[ -]?bold/iu.test(name)) weight = 600;
+        else if (font.bold || /bold/iu.test(name) || css?.fontWeight === 'bold') weight = 700;
+        else if (/(?:extra|ultra)[ -]?light/iu.test(name)) weight = 200;
+        else if (/light/iu.test(name)) weight = 300;
+        else if (/thin/iu.test(name)) weight = 100;
+        else if (/medium/iu.test(name)) weight = 500;
+        else weight = 400;
+    }
+    return {
+        sourceFontName: name,
+        fontFamily: font.fallbackName,
+        fontStyle: oblique || /oblique/iu.test(name) || Number(css?.italicAngle) ? 'oblique' :
+            italic || font.italic || /italic/iu.test(name) ? 'italic' : 'normal',
+        fontWeight: weight
+    };
+}
+
+async function nativeTextContent(page) {
+    const content = await page.getTextContent();
+    const names = [...new Set(content.items.filter(item => typeof item.str === 'string' && item.str.trim()).map(item => item.fontName))];
+    if (!names.length) return content;
+    // Loading font objects needs operators, not page.render or the OCR worker.
+    await page.getOperatorList();
+    await Promise.all(names.map(async name => {
+        const font = await new Promise(resolve => page.commonObjs.get(name, resolve));
+        if (font && typeof font.name === 'string' && font.name.trim()) {
+            content.styles[name] = { ...content.styles[name], ...nativeFontStyle(font) };
+        }
+    }));
+    return content;
+}
 
 class PdfOcrError extends Error {
     constructor(statusCode, message) {
@@ -30,8 +101,15 @@ function makeError(statusCode, message) {
     return new PdfOcrError(statusCode, message);
 }
 
-function isMeaningfulNativeText(text) {
-    return !text.includes('\uFFFD') && (text.match(/[\p{L}\p{N}]/gu) || []).length >= MIN_NATIVE_ALPHANUMERIC_CHARS;
+function isNativeProse(text) {
+    if (text.includes('\uFFFD')) return false;
+    const words = text.match(/[\p{L}]{2,}(?:['’-][\p{L}]+)*/gu) || [];
+    const letters = words.reduce((count, word) => count + word.length, 0);
+    const characters = (text.match(/[\p{L}\p{N}]/gu) || []).length;
+    // Plot labels and isolated mathematical glyphs are not a readable text layer.
+    return letters >= characters * 0.7 &&
+        (letters >= 200 || words.length >= 8 && letters >= 40 ||
+            words.length >= 2 && letters >= 8 && /[.!?。！？]\s*$/u.test(text));
 }
 
 function createPdfOcr(uploadsDirectory) {
@@ -43,6 +121,9 @@ function createPdfOcr(uploadsDirectory) {
 
     let shuttingDown = false;
     const inFlightPages = new Map();
+    const bookGenerations = new Map();
+    const descriptors = new Map();
+    const describing = new Map();
 
     function enqueue(job) {
         const result = jobQueue.then(job, job);
@@ -95,6 +176,150 @@ function createPdfOcr(uploadsDirectory) {
         return pdfjsPromise;
     }
 
+
+    function sourceVersion(fileStat) {
+        return crypto.createHash('sha256').update(`${fileStat.size}:${fileStat.mtimeMs}`).digest('hex');
+    }
+
+    async function getSource({ bookId, pdfPath }) {
+        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+        const fileStat = await getPdfStat(resolvedPdfPath);
+        return { pdfPath: resolvedPdfPath, sourceVersion: sourceVersion(fileStat) };
+    }
+
+    async function describePdf({ bookId, pdfPath, page }) {
+        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+        const fileStat = await getPdfStat(resolvedPdfPath);
+        const version = sourceVersion(fileStat);
+        const key = `${bookId}:${version}`;
+        const descriptorPath = path.join(pdfCacheRoot, bookId, 'descriptor.json');
+        if (page === undefined) {
+            const previous = descriptors.get(bookId);
+            if (previous?.sourceVersion === version) return { ...previous };
+            if (describing.has(key)) return { ...await describing.get(key) };
+            try {
+                const cached = JSON.parse(await fs.promises.readFile(descriptorPath, 'utf8'));
+                if (cached.classifierVersion === CLASSIFIER_VERSION && cached.sourceVersion === version &&
+                    Number.isSafeInteger(cached.totalPages) && cached.totalPages > 0 && ['native', 'scanned'].includes(cached.textLayer)) {
+                    const { classifierVersion, ...descriptor } = cached;
+                    descriptors.set(bookId, descriptor);
+                    return { ...descriptor };
+                }
+            } catch (_) {}
+        }
+        const work = (async () => {
+            const pdfjs = await loadPdfJs();
+            const task = pdfjs.getDocument({
+                data: new Uint8Array(await fs.promises.readFile(resolvedPdfPath)),
+                standardFontDataUrl: STANDARD_FONT_DATA_URL, cMapUrl: CMAP_URL, cMapPacked: true
+            });
+            try {
+                const document = await task.promise;
+                const result = { totalPages: document.numPages, sourceVersion: version };
+                if (page !== undefined) {
+                    if (!Number.isSafeInteger(page) || page < 1 || page > document.numPages) throw makeError(400, 'Invalid PDF page number.');
+                    const sourcePage = await document.getPage(page);
+                    const unit = sourcePage.getViewport({ scale: 1 });
+                    const viewport = sourcePage.getViewport({ scale: Math.min(BASE_RENDER_SCALE, MAX_RENDER_DIMENSION / Math.max(unit.width, unit.height)) });
+                    result.width = Math.max(1, Math.ceil(viewport.width));
+                    result.height = Math.max(1, Math.ceil(viewport.height));
+                } else {
+                    result.textLayer = 'scanned';
+                    // Covers/front matter cannot decide the book: inspect until readable native text is found.
+                    for (let number = 1; number <= document.numPages; number++) {
+                        const sourcePage = await document.getPage(number);
+                        try {
+                            const content = await sourcePage.getTextContent();
+                            const blocks = nativeBlocks(content, sourcePage.getViewport({ scale: 1 }));
+                            let hasNativeText = blocks.some(block => isNativeProse(block.text));
+                            if (!hasNativeText && blocks.some(block =>
+                                !block.text.includes('\uFFFD') && /[\p{L}]{3,}/u.test(block.text))) {
+                                const { OPS } = pdfjs;
+                                const operators = await sourcePage.getOperatorList();
+                                const graphics = new Set([
+                                    OPS.constructPath, OPS.rawFillPath, OPS.shadingFill,
+                                    OPS.stroke, OPS.closeStroke, OPS.fill, OPS.eoFill,
+                                    OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke,
+                                    OPS.paintImageXObject, OPS.paintImageXObjectRepeat,
+                                    OPS.paintInlineImageXObject, OPS.paintInlineImageXObjectGroup,
+                                    OPS.paintImageMaskXObject, OPS.paintImageMaskXObjectGroup,
+                                    OPS.paintImageMaskXObjectRepeat, OPS.paintSolidColorImageMask
+                                ]);
+                                // Sparse digital titles are still native text; plot labels
+                                // beside raster/vector graphics are not a readable page body.
+                                hasNativeText = !operators.fnArray.some(operation => graphics.has(operation));
+                            }
+                            if (hasNativeText) {
+                                result.textLayer = 'native';
+                                break;
+                            }
+                        } finally {
+                            sourcePage.cleanup();
+                        }
+                    }
+                }
+                if (sourceVersion(await getPdfStat(resolvedPdfPath)) !== version) throw makeError(409, 'The PDF source changed.');
+                if (page === undefined) {
+                    descriptors.set(bookId, result);
+                    await fs.promises.mkdir(path.dirname(descriptorPath), { recursive: true });
+                    const temporary = `${descriptorPath}.${crypto.randomUUID()}.tmp`;
+                    try {
+                        await fs.promises.writeFile(temporary, JSON.stringify({ classifierVersion: CLASSIFIER_VERSION, ...result }));
+                        fs.renameSync(temporary, descriptorPath);
+                    } finally {
+                        await fs.promises.rm(temporary, { force: true });
+                    }
+                }
+                return result;
+            } finally {
+                await task.destroy();
+            }
+        })();
+        if (page === undefined) describing.set(key, work);
+        try { return { ...await work }; } finally {
+            if (describing.get(key) === work) describing.delete(key);
+        }
+    }
+
+    async function readNativePage({ bookId, pdfPath, page, expectedSourceVersion }) {
+        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+        const fileStat = await getPdfStat(resolvedPdfPath);
+        const version = sourceVersion(fileStat);
+        if (expectedSourceVersion && version !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        const pdfjs = await loadPdfJs();
+        const task = pdfjs.getDocument({
+            data: new Uint8Array(await fs.promises.readFile(resolvedPdfPath)),
+            standardFontDataUrl: STANDARD_FONT_DATA_URL, cMapUrl: CMAP_URL, cMapPacked: true,
+            fontExtraProperties: true
+        });
+        try {
+            const document = await task.promise;
+            if (page > document.numPages) throw makeError(400, 'Invalid PDF page number.');
+            const sourcePage = await document.getPage(page);
+            const unit = sourcePage.getViewport({ scale: 1 });
+            const viewport = sourcePage.getViewport({ scale: Math.min(BASE_RENDER_SCALE, MAX_RENDER_DIMENSION / Math.max(unit.width, unit.height)) });
+            const blocks = nativeBlocks(await nativeTextContent(sourcePage), viewport);
+            if (sourceVersion(await getPdfStat(resolvedPdfPath)) !== version) throw makeError(409, 'The PDF source changed.');
+            return {
+                page, text: blocksText(blocks), blocks, source: 'native', confidence: null,
+                engine: 'pdfjs', device: 'cpu', modelRevision: requireFromHere('pdfjs-dist/package.json').version,
+                elapsedMs: 0, qualityLimits: [], metrics: {}, pipelineVersion: CACHE_VERSION,
+                width: Math.max(1, Math.ceil(viewport.width)), height: Math.max(1, Math.ceil(viewport.height))
+            };
+        } finally {
+            await task.destroy();
+        }
+    }
+
+    async function getCachedPage({ bookId, pdfPath, page, expectedSourceVersion }) {
+        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+        const fileStat = await getPdfStat(resolvedPdfPath);
+        if (expectedSourceVersion && sourceVersion(fileStat) !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        const cached = await readCachedPage(path.join(pdfCacheRoot, bookId), bookId, page, fileStat);
+        if (!cached || cached.source !== 'ocr') return null;
+        const { imagePath, ...result } = cached;
+        return result;
+    }
 
     function pageCacheStem(pageNumber) {
         return `page-${pageNumber}-v${CACHE_VERSION}`;
@@ -164,7 +389,7 @@ function createPdfOcr(uploadsDirectory) {
         }
     }
 
-    async function writeCache(cacheDirectory, pageResult, fileStat) {
+    async function writeCache(cacheDirectory, pageResult, fileStat, { stagingDirectory, pdfPath, isCurrent = () => true } = {}) {
         const imagePath = path.join(cacheDirectory, pageCacheStem(pageResult.page) + '.png');
         const jsonPath = path.join(cacheDirectory, pageCacheStem(pageResult.page) + '.json');
         const suffix = `${process.pid}-${Date.now()}`;
@@ -191,9 +416,23 @@ function createPdfOcr(uploadsDirectory) {
         };
         try {
             await fs.promises.writeFile(temporaryImagePath, pageResult.imageBuffer);
-            await fs.promises.rename(temporaryImagePath, imagePath);
             await fs.promises.writeFile(temporaryJsonPath, JSON.stringify(cacheRecord), 'utf8');
-            await fs.promises.rename(temporaryJsonPath, jsonPath);
+            if (!isCurrent()) throw makeError(409, 'The OCR job was replaced or deleted.');
+            if (pdfPath) {
+                const latest = fs.lstatSync(pdfPath);
+                if (!latest.isFile() || sourceVersion(latest) !== sourceVersion(fileStat)) throw makeError(409, 'The PDF source changed during OCR.');
+            }
+            // Publish without yielding: an obsolete generation cannot overwrite a newer lease.
+            if (stagingDirectory) {
+                for (const block of pageResult.blocks) {
+                    if (block.type === 'image') {
+                        const filename = path.basename(block.imageUrl);
+                        fs.renameSync(path.join(stagingDirectory, filename), path.join(cacheDirectory, filename));
+                    }
+                }
+            }
+            fs.renameSync(temporaryImagePath, imagePath);
+            fs.renameSync(temporaryJsonPath, jsonPath);
         } finally {
             await Promise.all([
                 fs.promises.rm(temporaryImagePath, { force: true }),
@@ -232,7 +471,6 @@ function createPdfOcr(uploadsDirectory) {
             }
 
             const page = await pdfDocument.getPage(pageNumber);
-            const textContent = await page.getTextContent();
             const unitViewport = page.getViewport({ scale: 1 });
             const scale = Math.min(BASE_RENDER_SCALE, MAX_RENDER_DIMENSION / Math.max(unitViewport.width, unitViewport.height));
             const viewport = page.getViewport({ scale });
@@ -244,23 +482,11 @@ function createPdfOcr(uploadsDirectory) {
             context.fillStyle = '#ffffff';
             context.fillRect(0, 0, width, height);
             await page.render({ canvasContext: context, viewport }).promise;
-            // Original PDF font identities distinguish single mathematical glyphs
-            // from ordinary prose without sending native paragraphs through OCR.
-            for (const [fontName, style] of Object.entries(textContent.styles || {})) {
-                if (page.commonObjs.has(fontName)) {
-                    const font = page.commonObjs.get(fontName);
-                    style.sourceFontName = font.name || fontName;
-                }
-            }
-            const blocks = nativeBlocks(textContent, viewport);
-            const nativeText = blocksText(blocks);
             // OCR must see source edges, not JPEG ringing around small math glyphs.
             const imageBuffer = canvas.toBuffer('image/png');
             const renderRegion = createSourceWindowRenderer(page, viewport, canvas);
             retained = true;
             return {
-                nativeText,
-                nativeBlocks: blocks,
                 imageBuffer,
                 width,
                 height,
@@ -275,14 +501,17 @@ function createPdfOcr(uploadsDirectory) {
         }
     }
 
-    async function processPage({ bookId, pdfPath, pageNumber, forceOcr }) {
+    async function processPage({ bookId, pdfPath, pageNumber, regenerate, expectedSourceVersion, isCurrent = () => true }) {
         const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
         const fileStat = await getPdfStat(resolvedPdfPath);
+        if (expectedSourceVersion && sourceVersion(fileStat) !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        if (!isCurrent()) throw makeError(409, 'The OCR job was replaced or deleted.');
         const cacheDirectory = path.join(pdfCacheRoot, bookId);
         await fs.promises.mkdir(cacheDirectory, { recursive: true });
 
-        const cachedPage = forceOcr ? null : await readCachedPage(cacheDirectory, bookId, pageNumber, fileStat);
-        if (cachedPage) {
+        const cachedPage = regenerate ? null : await readCachedPage(cacheDirectory, bookId, pageNumber, fileStat);
+        if (cachedPage?.source === 'ocr') {
+            if (!isCurrent()) throw makeError(409, 'The OCR job was replaced or deleted.');
             return {
                 page: cachedPage.page,
                 text: cachedPage.text,
@@ -302,116 +531,138 @@ function createPdfOcr(uploadsDirectory) {
             };
         }
 
-        const rendered = await renderPdfPage(resolvedPdfPath, pageNumber);
+        const stagingDirectory = path.join(cacheDirectory, `.work-${crypto.randomUUID()}`);
+        let rendered;
         try {
+            await fs.promises.mkdir(stagingDirectory, { recursive: true });
+            if (!isCurrent()) throw makeError(409, 'The OCR job was replaced or deleted.');
+            rendered = await renderPdfPage(resolvedPdfPath, pageNumber);
             const { imageBuffer, width, height, renderRegion } = rendered;
-            let blocks = rendered.nativeBlocks;
-            let source = 'native';
-            let text = rendered.nativeText || '';
-            let engine = 'pdfjs';
-            let device = 'cpu';
-            let modelRevision = requireFromHere('pdfjs-dist/package.json').version;
-            let elapsedMs = 0;
-            let qualityLimits = [];
-            let metrics = {};
+            if (!isCurrent()) throw makeError(409, 'The OCR job was replaced or deleted.');
+            let recognized;
+            let blocks;
             try {
-                if (forceOcr || !isMeaningfulNativeText(text)) {
-                    const recognized = await documentOcr.recognizePage({ imageBuffer, width, height, renderRegion });
-                    blocks = await documentBlocks(recognized, { imageBuffer, width, height, bookId,
-                        pageNumber, cacheDirectory, imagePrefix: pageAssetPrefix(bookId, pageNumber) });
-                    source = 'ocr';
-                    engine = recognized.engine;
-                    device = recognized.device;
-                    modelRevision = recognized.modelRevision;
-                    elapsedMs = recognized.elapsedMs;
-                    qualityLimits = recognized.qualityLimits || [];
-                    metrics = recognized.metrics || {};
-                } else {
-                    blocks = await processRegions({ blocks, imageBuffer, width, height,
-                        cacheDirectory, imagePrefix: pageAssetPrefix(bookId, pageNumber), renderRegion,
-                        recognizeMath: documentOcr.recognizeFormula });
-                }
-                text = blocksText(blocks);
-                if (!validBlocks(blocks, text)) throw new Error('The recognized PDF layout is invalid.');
+                recognized = await documentOcr.recognizePage({ imageBuffer, width, height, renderRegion });
+                blocks = await documentBlocks(recognized, { imageBuffer, width, height, bookId,
+                    pageNumber, cacheDirectory: stagingDirectory, imagePrefix: pageAssetPrefix(bookId, pageNumber) });
+                if (!validBlocks(blocks, blocksText(blocks))) throw new Error('The recognized PDF layout is invalid.');
             } catch (error) {
                 throw makeError(500, `PDF document recognition failed: ${error.message || String(error)}`);
             }
             const response = {
-                page: pageNumber, text, blocks, source, confidence: null,
-                engine, device, modelRevision, elapsedMs, qualityLimits,
-                metrics: { ...metrics, sourceWindows: { ...renderRegion.stats } },
+                page: pageNumber, text: blocksText(blocks), blocks, source: 'ocr', confidence: null,
+                engine: recognized.engine, device: recognized.device, modelRevision: recognized.modelRevision,
+                elapsedMs: recognized.elapsedMs, qualityLimits: recognized.qualityLimits || [],
+                metrics: { ...recognized.metrics, sourceWindows: { ...renderRegion.stats } },
                 pipelineVersion: CACHE_VERSION,
                 imageUrl: pageImageUrl(bookId, pageNumber), width, height, imageBuffer
             };
-            return await writeCache(cacheDirectory, response, fileStat);
+            return await writeCache(cacheDirectory, response, fileStat, { stagingDirectory, pdfPath: resolvedPdfPath, isCurrent });
         } finally {
-            await rendered.release();
+            await rendered?.release();
+            await fs.promises.rm(stagingDirectory, { recursive: true, force: true });
         }
     }
 
-    function getPdfPage({ bookId, pdfPath, page, forceOcr = false }) {
-        if (shuttingDown) return Promise.reject(makeError(503, 'PDF processing is shutting down.'));
-        if (!Number.isSafeInteger(page) || page < 1) {
-            return Promise.reject(makeError(400, 'Invalid page number.'));
+    async function saveComputedPage({ bookId, pdfPath, page, image, result, expectedSourceVersion, isCurrent }) {
+        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+        const fileStat = await getPdfStat(resolvedPdfPath);
+        if (sourceVersion(fileStat) !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        const geometry = await describePdf({ bookId, pdfPath, page });
+        if (geometry.sourceVersion !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        if (typeof image !== 'string' || image.length > 44 * 1024 * 1024 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image)) {
+            throw makeError(400, 'The worker image must be a base64 PNG smaller than 32 MiB.');
         }
-
-        const key = `${bookId}:${page}`;
-        let entry = inFlightPages.get(key);
-        if (entry) {
-            if (!forceOcr) return entry.promise;
-            if (entry.forcePromise) return entry.forcePromise;
-            if (entry.forceOcr) return entry.promise;
-
-            entry.forcePromise = entry.promise.then(() => {
-                return enqueue(() => processPage({
-                    bookId,
-                    pdfPath,
-                    pageNumber: page,
-                    forceOcr: true
-                }));
-            });
-            const clearInFlight = () => {
-                if (inFlightPages.get(key) === entry) inFlightPages.delete(key);
-            };
-            entry.forcePromise.then(clearInFlight, clearInFlight);
-            return entry.forcePromise;
+        const imageBuffer = Buffer.from(image, 'base64');
+        const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+        if (imageBuffer.length < 24 || imageBuffer.length > 32 * 1024 * 1024 || !imageBuffer.subarray(0, 8).equals(pngSignature) ||
+            imageBuffer.toString('ascii', 12, 16) !== 'IHDR' ||
+            imageBuffer.readUInt32BE(16) !== geometry.width || imageBuffer.readUInt32BE(20) !== geometry.height) {
+            throw makeError(400, 'The worker PNG dimensions do not match the PDF source.');
         }
+        const decoded = await requireFromHere('@napi-rs/canvas').loadImage(imageBuffer);
+        if (decoded.width !== geometry.width || decoded.height !== geometry.height) throw makeError(400, 'The worker PNG is invalid.');
+        if (!result || typeof result.engine !== 'string' || typeof result.device !== 'string' ||
+            typeof result.modelRevision !== 'string' || !Number.isFinite(result.elapsedMs) || result.elapsedMs < 0 ||
+            !Array.isArray(result.qualityLimits) || !result.qualityLimits.every(limit => typeof limit === 'string') ||
+            result.metrics !== undefined && (!result.metrics || typeof result.metrics !== 'object' || Array.isArray(result.metrics))) {
+            throw makeError(400, 'The worker OCR metadata is invalid.');
+        }
+        const cacheDirectory = path.join(pdfCacheRoot, bookId);
+        const stagingDirectory = path.join(cacheDirectory, `.work-${crypto.randomUUID()}`);
+        await fs.promises.mkdir(stagingDirectory, { recursive: true });
+        try {
+            const blocks = await documentBlocks(result, { imageBuffer, width: geometry.width, height: geometry.height,
+                bookId, pageNumber: page, cacheDirectory: stagingDirectory, imagePrefix: pageAssetPrefix(bookId, page) });
+            return await writeCache(cacheDirectory, {
+                page, text: blocksText(blocks), blocks, source: 'ocr', confidence: null,
+                engine: result.engine, device: result.device, modelRevision: result.modelRevision,
+                elapsedMs: result.elapsedMs, qualityLimits: result.qualityLimits, metrics: result.metrics || {},
+                pipelineVersion: CACHE_VERSION, imageUrl: pageImageUrl(bookId, page),
+                width: geometry.width, height: geometry.height, imageBuffer
+            }, fileStat, { stagingDirectory, pdfPath: resolvedPdfPath, isCurrent });
+        } finally {
+            await fs.promises.rm(stagingDirectory, { recursive: true, force: true });
+        }
+    }
 
-        entry = { forceOcr: Boolean(forceOcr), promise: null, forcePromise: null };
-        // A cached page must not wait behind another page's model inference.
+    async function getPdfPage({ bookId, pdfPath, page, nativeOnly, forceOcr = false, regenerate = forceOcr,
+        generation = '', expectedSourceVersion, isCurrent = () => true }) {
+        if (shuttingDown) throw makeError(503, 'PDF processing is shutting down.');
+        if (!Number.isSafeInteger(page) || page < 1) throw makeError(400, 'Invalid page number.');
+        if (nativeOnly === undefined) {
+            nativeOnly = !forceOcr && (await describePdf({ bookId, pdfPath })).textLayer === 'native';
+        }
+        // Native extraction has no raster/model/cache dependency and never joins queued OCR.
+        if (nativeOnly) return readNativePage({ bookId, pdfPath, page, expectedSourceVersion });
+        const localGeneration = bookGenerations.get(bookId) || 0;
+        const current = () => (bookGenerations.get(bookId) || 0) === localGeneration && isCurrent();
+        const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
+        const fileStat = await getPdfStat(resolvedPdfPath);
+        const version = sourceVersion(fileStat);
+        if (expectedSourceVersion && version !== expectedSourceVersion) throw makeError(409, 'The PDF source changed.');
+        if (!current()) throw makeError(409, 'The OCR job was replaced or deleted.');
+        const key = `${bookId}:${page}:${version}:${localGeneration}:${generation}:${Boolean(regenerate)}`;
+        const existing = inFlightPages.get(key);
+        if (existing) return existing.promise;
+        const entry = { promise: null };
         entry.promise = (async () => {
-            const resolvedPdfPath = resolvePdfPath(pdfPath, bookId);
-            const fileStat = await getPdfStat(resolvedPdfPath);
-            const cached = entry.forceOcr ? null : await readCachedPage(path.join(pdfCacheRoot, bookId), bookId, page, fileStat);
-            if (cached) {
+            const cached = regenerate ? null : await readCachedPage(path.join(pdfCacheRoot, bookId), bookId, page, fileStat);
+            if (!current()) throw makeError(409, 'The OCR job was replaced or deleted.');
+            if (cached?.source === 'ocr') {
                 const { imagePath, ...result } = cached;
                 return result;
             }
             return enqueue(() => processPage({
-                bookId,
-                pdfPath: resolvedPdfPath,
-                pageNumber: page,
-                forceOcr: entry.forceOcr
+                bookId, pdfPath: resolvedPdfPath, pageNumber: page, regenerate,
+                expectedSourceVersion: version, isCurrent: current
             }));
         })();
         inFlightPages.set(key, entry);
-        const clearInFlight = () => {
-            if (!entry.forcePromise && inFlightPages.get(key) === entry) inFlightPages.delete(key);
+        const clear = () => {
+            if (inFlightPages.get(key) === entry) inFlightPages.delete(key);
         };
-        entry.promise.then(clearInFlight, clearInFlight);
+        entry.promise.then(clear, clear);
         return entry.promise;
     }
 
-    function deleteBookCache(bookId) {
+    function cancelBookOcr(bookId) {
+        bookGenerations.set(bookId, (bookGenerations.get(bookId) || 0) + 1);
+    }
+
+    function deleteBookCache(bookId, { waitForJobs = true } = {}) {
         if (typeof bookId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(bookId)) {
             return Promise.reject(makeError(400, 'Invalid book identifier.'));
         }
+        cancelBookOcr(bookId);
+        descriptors.delete(bookId);
         const cacheDirectory = path.join(pdfCacheRoot, bookId);
+        if (!waitForJobs) return fs.promises.rm(cacheDirectory, { recursive: true, force: true });
         const pagePrefix = `${bookId}:`;
         const pendingPages = [];
         for (const [key, entry] of inFlightPages) {
             if (key.startsWith(pagePrefix)) {
-                pendingPages.push(entry.forcePromise || entry.promise);
+                pendingPages.push(entry.promise);
             }
         }
         return Promise.allSettled(pendingPages)
@@ -420,13 +671,13 @@ function createPdfOcr(uploadsDirectory) {
 
     async function shutdown() {
         shuttingDown = true;
-        const pendingPages = Array.from(inFlightPages.values(), entry => entry.forcePromise || entry.promise);
+        await documentOcr.shutdown();
+        const pendingPages = Array.from(inFlightPages.values(), entry => entry.promise);
         await Promise.allSettled(pendingPages);
         await jobQueue;
-        await documentOcr.shutdown();
     }
 
-    return { getPdfPage, deleteBookCache, shutdown };
+    return { getPdfPage, getCachedPage, getSource, describePdf, saveComputedPage, cancelBookOcr, deleteBookCache, shutdown, pipelineVersion: CACHE_VERSION };
 }
 
 module.exports = createPdfOcr;

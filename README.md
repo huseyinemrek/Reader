@@ -2,9 +2,11 @@
 
 Modern, hızlı ve tarayıcı tabanlı EPUB, PDF ve HTML kitap okuyucu. Özellikle **Microsoft Edge "Sesli Oku" (Read Aloud)** ve dahili Text-to-Speech (TTS) motorlarıyla kusursuz uyum sağlayacak şekilde tasarlanmıştır.
 
-Proje ihtiyacınıza göre iki farklı çalışma modeline sahiptir:
-1. **`local/` — Yerel Node.js Sunucu Sürümü:** Çevrimdışı veya evinizdeki yerel ağda (Wi-Fi / LAN) çalışan, harici bulut hesabı gerektirmeyen bağımsız sürüm.
-2. **`hosting/` — Firebase Cloud Sürümü:** Firebase Auth, Firestore ve Cloud Storage üzerinde çalışan, HTTP Range streaming destekli sunucusuz (serverless) bulut sürümü.
+Proje dört çalışma bileşenine ayrılır:
+1. **`local/` — Bağımsız Yerel Sürüm:** Aynı bilgisayarda Node.js sunucu ve yerel CPU/CUDA OCR; ev/LAN kullanımı.
+2. **`vps/` — Sürekli Çalışan Tam Sunucu:** Aynı okuyucu ve kütüphane özellikleri, kendi CPU OCR motoru, kalıcı arka plan kuyruğu ve isteğe bağlı ev worker’ına iş devretme.
+3. **`compute/` — İsteğe Bağlı GPU Worker:** Ev bilgisayarından VPS’ye yalnız outbound HTTPS; bilgisayar moduna atanmış kitapları işler, sonuçları VPS diskine teslim eder ve kuyruk boşalınca kapanır.
+4. **`hosting/` — Firebase Cloud Sürümü:** Mevcut Auth, Firestore ve Cloud Storage tabanlı statik/serverless sürüm; değişmeden korunur.
 
 ---
 
@@ -19,7 +21,8 @@ Proje ihtiyacınıza göre iki farklı çalışma modeline sahiptir:
 - 📑 **İçindekiler (TOC):** Bölümler arasında tek tıkla gezinme.
 - 📑 **PDF & EPUB Hibrit Desteği:** EPUB arşivlerini doğrudan istemcide açabilme ve PDF dosyalarını optimize edilmiş parça yükleme ile okuma.
 - 🔍 **Vektörel PDF Görüntüleyici:** PDF.js ile dinamik döşemeli (tiled canvas) vektör çizim mimarisi. Sayfayı %500'e kadar büyütürken bulanıklaşma ve pikselleşme olmadan orijinal netliği koruma; OCR beklemeden anında kaynak çizimi.
-- 🤖 **Yerel Belge OCR & Formül Tanıma (`local/`):** GLM-OCR ve PP-DocLayoutV3 ile sayfa yapısı analizi (başlık, paragraf, algoritma, formül). Metin ve denklemler kaynak PDF'ten uyarlanabilir pencerelerle okunur, satır içi matematik KaTeX formatında metne gömülür. NVIDIA GPU (CUDA BF16 SDPA) hızlandırması desteklenir. Ayrıntılar için [local/README.md](local/README.md).
+- **Belge OCR & Formül Tanıma (`local/`, `vps/`, `compute/`):** Ortak GLM-OCR / PP-DocLayoutV3 hattı ve kaynak PDF pencereleri; paragraflar doğal olarak yeniden akar, kod/algoritma satırları korunur. VPS’nin CPU OCR yeteneği korunur; kullanıcı bilgisayar modunu seçerek tüm PDF’yi veya sayfa aralığını evdeki CUDA BF16 worker’a hazırlatabilir.
+- **PDF Düzeni ve OCR Kontrolü (`local/`, `vps/`):** Ayarlardan yalnız metin veya iki yönlü PDF/metin düzeni; sürüklenebilir, genişliği saklanan ayırıcı. OCR kapaktan değil kitap düzeyindeki metin katmanına göre seçilir; kitap için otomatik/açık/kapalı ve kapalıyken bile açık sayfa OCR isteği desteklenir.
 
 ---
 
@@ -45,6 +48,18 @@ reader/
 │   ├── .env.example            # Port ve OCR cihazı yapılandırma şablonu
 │   ├── library.example.json    # Boş kütüphane şablonu
 │   └── README.md               # Yerel sürüm kılavuzu
+│
+├── vps/                        # Aynı tam okuyucu + kalıcı CPU/GPU iş kuyruğu
+│   ├── server.js               # Paylaşılan sunucunun VPS giriş noktası
+│   ├── .env.example            # Worker secret, veri dizini, CPU OCR ayarları
+│   └── README.md               # Ubuntu / Oracle Ampere kurulum ve taşıma
+│
+├── compute/                    # Yalnız ihtiyaç olduğunda başlatılan GPU worker
+│   ├── worker.py               # Güvenli outbound claim/render/OCR/teslim döngüsü
+│   ├── requirements.txt        # Ortak OCR + Python PDF/ağ bağımlılıkları
+│   ├── cuda-requirements.txt   # CUDA PyTorch bağımlılıkları
+│   ├── .env.example            # VPS_URL ve WORKER_SECRET
+│   └── README.md               # Windows/Linux kurulum ve çalıştırma
 │
 ├── hosting/                    # Firebase Cloud sürümü
 │   ├── firebase.json           # Firebase Hosting ve SPA yönlendirme kuralları
@@ -73,12 +88,12 @@ reader/
 
 ### 1. Yerel Sürüm (`local/`)
 
-Kendi bilgisayarınızda veya VPS sunucunuzda çalıştırmak için:
+Kendi bilgisayarınızda çalıştırmak için:
 Node.js 22 LTS veya 24 LTS önerilir.
 
 ```bash
 cd local
-cp firebase-config.example.js firebase-config.js # Firebase proje bilgilerinizi girin
+cp .env.example .env            # Firebase isteğe bağlı; OCR_DEVICE=auto/cuda/cpu
 npm install
 npm start
 ```
@@ -90,8 +105,20 @@ Sunucu başladığında terminalde yerel IP adresiniz listelenir:
 Ayrıntılı bilgi için [local/README.md](local/README.md) dosyasına göz atabilirsiniz.
 
 ---
+### 2. VPS + Ev GPU Worker (`vps/` ve `compute/`)
 
-### 2. Bulut Sürümü (`hosting/`)
+VPS kendi CPU OCR motoruyla tek başına çalışabilir; ev bilgisayarı zorunlu değildir. Ağ isteği OCR bitene kadar açık tutulmaz: kaynak PDF kullanılabilir kalır, metin `pending/processing` durumuyla hazırlanır.
+
+1. [VPS kurulumunu](vps/README.md) uygulayın; `.env` içinden Firebase, CPU OCR ve uzun rastgele `WORKER_SECRET` değerini ayarlayın.
+2. [Compute kurulumunu](compute/README.md) uygulayın; `.env` içinde HTTPS `VPS_URL` ve aynı `WORKER_SECRET` değerini kullanın. Mevcut VPS yalnız HTTP sunuyorsa `.env` içindeki `SSH_HOST`, `SSH_USER` ve `SSH_KEY_FILE` ile worker’ın otomatik şifreli outbound SSH tünelini seçin.
+3. PDF okuyucusunda **Ayarlar → OCR işleme ve dışarı çıkmadan kitap hazırlama** panelinde **Bilgisayarım / GPU worker** seçin. Varsayılan kapsam **Tüm kitap**; sayfa aralığı da seçilebilir. **OCR hazırlamayı başlat** ile işleri kuyruğa ekleyin; bu açık istek kitap için OCR’ı etkinleştirir.
+4. Evde `compute/worker.py` çalıştırın. Worker yalnız bilgisayar modundaki işleri alır; CPU/GPU modları kendiliğinden birbirine düşmez. Kuyruk boşalınca kapanır.
+5. Tamamlanan metin, LaTeX, blok koordinatları ve kaynak görseller VPS diskinde saklanır. Ev bilgisayarı kapalıyken de dışarıdan okunabilir ve sesli okumada kullanılabilir.
+
+Otomatik OCR yalnız taranmış/vektör gövdeli kitaplarda açılan sayfaları hazırlar; metinli kitabın boş kapağı iş başlatmaz. Ayarlardan OCR’ı kitap için kapatabilir veya tek sayfayı elle yeniden işletebilirsiniz. Aynı hazırlama panelinden toplu VPS CPU OCR de istenebilir. `local/` kendi kütüphanesini ve motorunu kullanmayı sürdürür; `hosting/` bu kuyruk sisteminden bağımsızdır.
+
+
+### 3. Bulut Sürümü (`hosting/`)
 
 Kendi Firebase projenizde barındırmak için:
 

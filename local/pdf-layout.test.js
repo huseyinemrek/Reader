@@ -66,6 +66,80 @@ test('column reading order is retained without interleaving equal-y rows', () =>
     consistent(blocks);
 });
 
+test('equal-size native runs preserve face, family, italic and numeric weight boundaries', () => {
+    const styles = {
+        regular: { sourceFontName: 'ABCDEF+Book-Regular', fontFamily: 'serif', fontStyle: 'normal', fontWeight: 400 },
+        italic: { sourceFontName: 'ABCDEF+Book-Italic', fontFamily: 'serif', fontStyle: 'italic', fontWeight: 400 },
+        bold: { sourceFontName: 'ABCDEF+Book-Bold', fontFamily: 'serif', fontStyle: 'normal', fontWeight: 700 },
+        other: { sourceFontName: 'GHIJKL+Other-Regular', fontFamily: 'sans-serif', fontStyle: 'normal', fontWeight: 400 },
+        oblique: { sourceFontName: 'GHIJKL+Other-Oblique', fontFamily: 'sans-serif', fontStyle: 'oblique', fontWeight: 450 }
+    };
+    const faces = ['regular', 'regular', 'italic', 'bold', 'other', 'oblique'];
+    const words = ['Ordinary', 'text', 'emphasis', 'strong', 'different', 'slanted'];
+    const blocks = nativeBlocks({ items: words.map((word, index) => ({
+        ...item(word, 100 + index * 60, 800, 10, 59, index === words.length - 1),
+        fontName: faces[index]
+    })), styles }, viewport);
+    assert.equal(blocks[0].text, words.join(' '));
+    assert.deepEqual(blocks[0].runs, [
+        { type: 'text', text: 'Ordinary text', fontScale: 1, fontName: styles.regular.sourceFontName, fontFamily: 'serif', fontStyle: 'normal', fontWeight: 400 },
+        { type: 'text', text: ' emphasis', fontScale: 1, fontName: styles.italic.sourceFontName, fontFamily: 'serif', fontStyle: 'italic', fontWeight: 400 },
+        { type: 'text', text: ' strong', fontScale: 1, fontName: styles.bold.sourceFontName, fontFamily: 'serif', fontStyle: 'normal', fontWeight: 700 },
+        { type: 'text', text: ' different', fontScale: 1, fontName: styles.other.sourceFontName, fontFamily: 'sans-serif', fontStyle: 'normal', fontWeight: 400 },
+        { type: 'text', text: ' slanted', fontScale: 1, fontName: styles.oblique.sourceFontName, fontFamily: 'sans-serif', fontStyle: 'oblique', fontWeight: 450 }
+    ]);
+    consistent(blocks);
+    for (const field of ['sourceFontName', 'fontFamily', 'fontStyle', 'fontWeight']) {
+        const changed = { ...styles.regular, [field]: styles.oblique[field] };
+        const boundary = nativeBlocks({ items: [
+            { ...item('Same', 100, 800, 10, 40, false), fontName: 'before' },
+            { ...item('size', 141, 800, 10, 40), fontName: 'after' }
+        ], styles: { before: styles.regular, after: changed } }, viewport);
+        assert.deepEqual(boundary[0].runs.map(run => run.text), ['Same', ' size']);
+    }
+});
+
+test('dehyphenation survives font changes inside a word and a separately styled hyphen', () => {
+    const styles = {
+        body: { sourceFontName: 'Book-Regular', fontFamily: 'serif', fontStyle: 'normal', fontWeight: 400 },
+        italic: { sourceFontName: 'Book-Italic', fontFamily: 'serif', fontStyle: 'italic', fontWeight: 400 }
+    };
+    const blocks = nativeBlocks({ items: [
+        item('Read reinforcement learning using rein', 100, 800, 10, 300, false),
+        { ...item('-', 400, 800, 10, 5), fontName: 'italic' },
+        { ...item('forcement concepts.', 100, 787, 10, 130), fontName: 'italic' },
+        item('A source discretionary soft', 100, 700, 10, 300, false),
+        { ...item('\u00ad', 400, 700, 10, 5), fontName: 'italic' },
+        item('ware word.', 100, 687, 10, 130)
+    ], styles }, viewport);
+    assert.deepEqual(blocks.map(block => block.text), [
+        'Read reinforcement learning using reinforcement concepts.',
+        'A source discretionary software word.'
+    ]);
+    assert.deepEqual(blocks[0].runs.map(run => [run.text, run.fontStyle]), [
+        ['Read reinforcement learning using rein', 'normal'], ['forcement concepts.', 'italic']
+    ]);
+    consistent(blocks);
+});
+
+test('optional native typography is validated without adding styling to legacy OCR runs', () => {
+    const block = { type: 'text', text: 'Recognized prose', bbox: { x0: 1, y0: 1, x1: 100, y1: 20 },
+        runs: [{ type: 'text', text: 'Recognized prose', fontScale: 1 }] };
+    assert.equal(validBlocks([block], block.text), true);
+    for (const [field, value] of [
+        ['fontName', ''], ['fontName', 42], ['fontName', 'g_d7_f1'],
+        ['fontFamily', '  '], ['fontFamily', false],
+        ['fontStyle', 'bold'], ['fontWeight', '700'], ['fontWeight', 0],
+        ['fontWeight', 1001], ['fontWeight', NaN], ['fontWeight', Infinity]
+    ]) {
+        const invalid = { ...block, runs: [{ ...block.runs[0], [field]: value }] };
+        assert.equal(validBlocks([invalid], invalid.text), false, `${field}: ${value}`);
+    }
+    const styled = { ...block, runs: [{ ...block.runs[0], fontName: 'ABCDEF+Book',
+        fontFamily: 'serif', fontStyle: 'oblique', fontWeight: 450 }] };
+    assert.equal(validBlocks([styled], styled.text), true);
+});
+
 test('unstructured or internally inconsistent cached layouts are rejected', () => {
     assert.equal(validBlocks(undefined, 'Old cache'), false);
     const blocks = nativeBlocks({ items: [item('Here is ordinary body text', 100, 800, 10, 180)] }, viewport);

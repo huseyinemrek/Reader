@@ -14,9 +14,6 @@ import traceback
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-# Third-party status output must never corrupt the protocol.
-protocol = sys.stdout
-sys.stdout = sys.stderr
 
 import torch
 import numpy as np
@@ -30,6 +27,8 @@ LAYOUT_REVISION = "e4f489dc536556fc1be02b973ba06756e0d4a2ac"
 BATCH_SIZE = 4
 MAX_NEW_TOKENS = 2048
 PROMPTS = {"text": "Text Recognition:", "formula": "Formula Recognition:", "table": "Table Recognition:"}
+PROMPTS["formula_prose"] = "Text Recognition: Preserve natural word spaces in equation prose using LaTeX \\text{}."
+LETTER_SPELLED_PROSE = re.compile(r"(?<!\w)(?:[^\W\d_][ \t]+){12,}[^\W\d_](?!\w)")
 CACHE_ENTRIES = 128
 CACHE_TEXT_BYTES = 4 * 1024 * 1024
 MATH_SLOTS = re.compile(r"(?<!\\)\$\$[\s\S]+?(?<!\\)\$\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]|(?<![\\$])\$(?!\$)[\s\S]+?(?<![\\$])\$(?!\$)")
@@ -133,12 +132,19 @@ class DocumentOcr:
         last_ink = box["y0"]+int(content_rows[-1]) if len(content_rows) else box["y1"]
         crop.close()
         gaps = []
+        gap_sizes = {}
         for rows in np.split(white_rows, np.flatnonzero(np.diff(white_rows) > 1)+1):
             if len(rows) >= (2 if line_windows else 5):
                 y = box["y0"] + int(rows[len(rows)//2])
                 if first_ink < y < last_ink and box["y0"]+5 < y < box["y1"]-5 and not any(
                         item["bbox"]["y0"] <= y <= item["bbox"]["y1"] for item in region.get("nestedFormulas", [])):
                     gaps.append(y)
+                    gap_sizes[y] = len(rows)
+        # A substantially larger source gap is a paragraph boundary; ordinary
+        # line gaps and inference-window boundaries are only soft wrapping.
+        typical_gap = float(np.median(list(gap_sizes.values()))) if gap_sizes else 0
+        paragraph_cuts = {y for y, size in gap_sizes.items() if size >= max(typical_gap * 1.7, typical_gap + 4)}
+        region["paragraphCuts"] = paragraph_cuts
         cuts = [box["y0"]]
         if line_windows:
             cuts.extend(gaps)
@@ -147,7 +153,8 @@ class DocumentOcr:
                 candidates = [y for y in gaps if cuts[-1]+250 < y < cuts[-1]+650]
                 if not candidates:
                     break
-                cuts.append(min(candidates, key=lambda y: abs(y-(cuts[-1]+450))))
+                paragraph_candidates = [y for y in candidates if y in paragraph_cuts]
+                cuts.append(min(paragraph_candidates or candidates, key=lambda y: abs(y-(cuts[-1]+450))))
         cuts.append(box["y1"])
         return [{"x0": box["x0"], "y0": a, "x1": box["x1"], "y1": b}
                 for a, b in zip(cuts, cuts[1:])]
@@ -262,11 +269,17 @@ class DocumentOcr:
                 boxes = self.text_windows(image, region)
                 pieces = self.algorithm_windows(image, region, boxes) if region["layoutLabel"] == "algorithm" else [
                     {"kind": region["kind"], "bbox": box} for box in boxes]
+                paragraph_cuts = region.pop("paragraphCuts", set())
+                structured = region["layoutLabel"] in ("algorithm", "code", "poetry", "verse")
+                if structured:
+                    region["preserveWhitespace"] = True
                 for piece in pieces:
                     context_formula = piece.pop("contextFormula", None)
                     if context_formula:
                         region.setdefault("nestedFormulas", []).append({"kind": "formula", "bbox": context_formula, "layoutLabel": "formula"})
+                    separator = "\n" if structured else "\n\n" if piece["bbox"]["y0"] in paragraph_cuts else " "
                     windows.append({"id": len(windows), "regionIndex": region_index, **piece,
+                                    "separatorBefore": separator,
                                     "layoutLabel": region["layoutLabel"], "parentBBox": region["bbox"]})
                 for formula in region.get("nestedFormulas", []):
                     formula["windowId"] = len(windows)
@@ -324,6 +337,20 @@ class DocumentOcr:
             contents = self.recognize([item[1][1] for item in batch], [item[1][0]["kind"] for item in batch])
             if len(contents) != len(batch):
                 raise RuntimeError("OCR returned an incomplete batch.")
+            # Formula-task TeX can spell long prose labels as individual letters,
+            # losing every word boundary. Re-read the same genuine source crop
+            # with an explicit prose-aware task; never guess spaces or words.
+            prose_indices = [index for index, (_, (window, _, _)) in enumerate(batch)
+                             if window["kind"] == "formula" and LETTER_SPELLED_PROSE.search(contents[index])]
+            if prose_indices:
+                contextual = self.recognize([batch[index][1][1] for index in prose_indices],
+                                            ["formula_prose"] * len(prose_indices))
+                if len(contextual) != len(prose_indices):
+                    raise RuntimeError("OCR returned incomplete equation prose.")
+                for index, content in zip(prose_indices, contextual):
+                    if MATH_SLOTS.fullmatch(content.strip()) is None:
+                        raise RuntimeError("Prose-aware formula recognition returned no complete math envelope.")
+                    contents[index] = content
             for (key, (window, _, ids)), content in zip(batch, contents):
                 content = content.strip()
                 if window["kind"] == "formula" and not self.unwrap_formula(content):
@@ -361,10 +388,14 @@ class DocumentOcr:
                 if region["kind"] == "figure":
                     continue
                 windows = [w for w in plan["windows"] if w["regionIndex"] == index and not w.get("inline")]
-                region["content"] = "\n".join(contents[w["id"]] for w in windows)
-                offsets, cursor, annotations = {}, 0, []
+                parts, cursor, annotations, offsets = [], 0, [], {}
                 for window in windows:
+                    if parts:
+                        separator = window.get("separatorBefore", "\n")
+                        parts.append(separator)
+                        cursor += len(separator)
                     text = contents[window["id"]]
+                    parts.append(text)
                     length = len(text.encode("utf-16-le")) // 2
                     offsets[window["id"]] = cursor
                     if window.get("algorithmMath"):
@@ -373,7 +404,8 @@ class DocumentOcr:
                             raise RuntimeError(f"Algorithm formula window {window['bbox']} returned no complete model math envelope; refusing untyped or incomplete algorithm math.")
                         annotations.append({"start": cursor, "end": cursor+length,
                                             "latex": self.unwrap_formula(text), "bbox": window["bbox"]})
-                    cursor += length+1
+                    cursor += length
+                region["content"] = "".join(parts)
                 formulas = region.pop("nestedFormulas", [])
                 if not formulas:
                     if annotations:
@@ -439,6 +471,9 @@ class DocumentOcr:
 
 
 def main():
+    # CLI diagnostics use stderr; importing DocumentOcr leaves host stdout alone.
+    protocol = sys.stdout
+    sys.stdout = sys.stderr
     runtime = None
     for line in sys.stdin:
         request = None

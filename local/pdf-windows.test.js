@@ -5,8 +5,7 @@ const assert = require('node:assert/strict');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { createSourceWindowRenderer } = require('./pdf-windows');
 
-function vectorPdf() {
-    const stream = '0 0 0 rg 50 540 .25 10 re f 60 540 2 10 re f\n1 0 0 rg 30 540 9 10 re f 80 540 9 10 re f';
+function vectorPdf(stream = '0 0 0 rg 50 540 .25 10 re f 60 540 2 10 re f\n1 0 0 rg 30 540 9 10 re f 80 540 9 10 re f') {
     const objects = ['<< /Type /Catalog /Pages 2 0 R >>',
         '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
         '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 600] /Resources << >> /Contents 4 0 R >>',
@@ -22,9 +21,9 @@ function vectorPdf() {
     return new Uint8Array(Buffer.from(data));
 }
 
-async function sourceWindows(run) {
+async function sourceWindows(run, stream) {
     const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-    const task = pdfjs.getDocument({ data: vectorPdf() });
+    const task = pdfjs.getDocument({ data: vectorPdf(stream) });
     const pdf = await task.promise;
     const page = await pdf.getPage(1);
     const viewport = page.getViewport({ scale: 1 });
@@ -79,4 +78,26 @@ test('large windows respect physical pixel limits and invalid source bounds fail
         await assert.rejects(render({ bbox: { x0: -1, y0: 0, x1: 80, y1: 80 }, kind: 'text' }), /coordinates/);
         await assert.rejects(render({ bbox: { x0: 40, y0: 40, x1: 40, y1: 80 }, kind: 'text' }), /coordinates/);
     });
+});
+
+test('formula source crops retain the entire thin radical hook, descender and overbar', async () => {
+    await sourceWindows(async render => {
+        const { width, height, pixels } = await windowPixels(await render({
+            bbox: { x0: 95, y0: 95, x1: 170, y1: 150 }, kind: 'formula' }));
+        const zoomX = (width - 24) / 75, zoomY = (height - 24) / 55;
+        const hasInk = (sourceX, sourceY) => {
+            const x = Math.round(12 + (sourceX - 95) * zoomX);
+            const y = Math.round(12 + (sourceY - 95) * zoomY);
+            for (let dy = -2; dy <= 2; dy++) {
+                for (let dx = -2; dx <= 2; dx++) {
+                    if (pixels[((y + dy) * width + x + dx) * 4] < 220) return true;
+                }
+            }
+            return false;
+        };
+        assert.ok(hasInk(101, 120), 'the initial radical hook must remain visible');
+        assert.ok(hasInk(114, 145), 'the descender must not be clipped');
+        assert.ok(hasInk(125, 100), 'the rising radical stroke must meet the overbar');
+        assert.ok(hasInk(164, 100), 'the far end of the overbar must remain visible');
+    }, '0 0 0 RG .25 w 100 480 m 108 484 l 114 455 l 124 500 l 165 500 l S');
 });

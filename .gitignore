@@ -2,6 +2,7 @@
 node_modules/
 **/node_modules/**
 package-lock.json
+!local/package-lock.json
 
 # Python virtual environments and caches
 .venv/
@@ -35,8 +36,15 @@ uploads/
 library.json
 **/library.json
 !**/library.example.json
+# VPS persistent job queue and isolated runtime data
+**/compute-jobs.json
+**/compute-jobs.json.*
+**/data/
+**/.smoke-*/
 *.epub
 *.pdf
+!tests/fixtures/typography-outline.pdf
+!tests/fixtures/without-outline.pdf
 *.zip
 *.htmlz
 

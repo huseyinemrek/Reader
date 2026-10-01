@@ -23,23 +23,14 @@ test('mixed prose preserves inline subscripts and fractions without leaking math
     assert.equal(validBlocks(blocks, blocksText(blocks)), true);
 });
 
-test('source line breaks and pseudocode indentation survive with a separate multi-line cases equation', async () => {
-    const content = String.raw`Initialize, for each action $a$:
-    $Q(a) \leftarrow 0$
-    $N(a) \leftarrow 0$
-Loop forever:
-$$A \leftarrow \begin{cases}\arg\max_a Q(a) & \text{with probability }1-\epsilon \\ \text{a random action} & \text{with probability }\epsilon\end{cases}$$
-    $R \leftarrow \operatorname{bandit}(A)$
-    $N(A) \leftarrow N(A)+1$
-    $Q(A) \leftarrow Q(A)+\frac{1}{N(A)}[R-Q(A)]$`;
-    const blocks = await parse([textRegion(content)]);
-    assert.deepEqual(blocks.map(block => block.type), ['text', 'math', 'text']);
-    assert.equal(blocks[0].text, 'Initialize, for each action :\n    \n    \nLoop forever:\n');
-    assert.match(blocks[1].latex, /\\begin\{cases\}[\s\S]*1-\\epsilon[\s\S]*\\end\{cases\}/u);
-    assert.equal(blocks[2].text, '\n    \n    \n    ');
-    assert.equal(blocks[2].runs.filter(run => run.type === 'math').at(-1).latex,
-        String.raw`Q(A) \leftarrow Q(A)+\frac{1}{N(A)}[R-Q(A)]`);
+test('reflow keeps an inline formula at a padded paragraph boundary selectable', async () => {
+    const blocks = await parse([textRegion(' \n$x$\ncontinues here.\n ')]);
+    assert.equal(blocks[0].text, ' continues here.');
+    assert.equal(blocks[0].runs[0].type, 'math');
+    assert.equal(blocks[0].runs[0].latex, 'x');
+    assert.equal(validBlocks(blocks, blocksText(blocks)), true);
 });
+
 
 test('display delimiters and explicit tags preserve equation labels outside selectable LaTeX', async () => {
     const blocks = await parse([
@@ -52,7 +43,6 @@ After.`),
     assert.deepEqual(equations.map(block => block.label), ['(2.5)', '(2.6)']);
     assert.equal(equations[0].latex, String.raw`Q_n = \frac{1}{n}\sum_{i=1}^{n}R_i`);
     assert.doesNotMatch(equations[1].latex, /\\tag/u);
-    assert.equal(blocksText(blocks), 'Before.\n\n\n\nAfter.');
 });
 
 test('escaped and ordinary prices do not consume adjacent inline math', async () => {
@@ -68,7 +58,7 @@ test('headings use explicit source scale only and raw HTML stays literal selecta
     ]);
     assert.equal(blocks[0].text, '2.5 Nonstationary Problems');
     assert.equal(blocks[0].runs[0].fontScale, 1.25);
-    assert.equal(blocks[1].text, '<img src=x onerror=alert(1)>\nTiny glyphs do not determine paragraph size.');
+    assert.equal(blocks[1].text, '<img src=x onerror=alert(1)> Tiny glyphs do not determine paragraph size.');
     assert.equal(blocks[1].runs[0].fontScale, 1);
 });
 
@@ -154,7 +144,7 @@ test('zoomed inline formulas replace only their anchored source slot before Unic
         { start, end: start + '$Q_n$'.length, latex: 'Q_{n+1}', bbox: { x0: 100, y0: 40, x1: 140, y1: 60 } },
         { start: finalStart, end: finalStart + '\\(n\\)'.length, latex: String.raw`\frac{1}{n}`, bbox: { x0: 200, y0: 40, x1: 230, y1: 60 } }
     ] }]);
-    assert.equal(blocks[0].text, '😀 heading\nUse  twice:  and .');
+    assert.equal(blocks[0].text, '😀 heading Use  twice:  and .');
     assert.deepEqual(blocks[0].runs.filter(run => run.type === 'math').map(run => run.latex),
         ['Q_n', 'Q_{n+1}', String.raw`\frac{1}{n}`]);
 });
@@ -233,15 +223,45 @@ test('a right-margin equation number labels its unambiguous short equation acros
     assert.equal(blocks[0].label, '(2.5)');
 });
 
-test('algorithm math retains prose word spacing without rewriting mathematical products or authored formulas', async () => {
-    const content = String.raw`A $\leftarrow\begin{cases}\arg\max_a Q(a)&\mathrm{with probability} 1-\epsilon\\\mathrm{a random action}&\epsilon\end{cases}$; $\mathrm{A B}$; $\mathrm{sin x}$; $\mathrm{𝑥 𝑦}$`;
-    const algorithm = await parse([{ ...textRegion(content), layoutLabel: 'algorithm' }]);
-    const math = algorithm[0].runs.filter(run => run.type === 'math');
+test('multiword roman prose retains word spaces in inline and display equations without changing math products', async () => {
+    const content = String.raw`A $\leftarrow\begin{cases}\arg\max_a Q(a)&\mathrm {with probability} 1-\epsilon\\\mathrm{a random action}&\epsilon\end{cases}$; $\mathrm{A B}$; $\mathrm{sin x}$; $\mathrm{𝑥 𝑦}$`;
+    const blocks = await parse([textRegion(content),
+        { kind: 'formula', bbox, content: String.raw`x=1 \quad \mathrm {subject to} y>0` }]);
+    const math = blocks[0].runs.filter(run => run.type === 'math');
     assert.match(math[0].latex, /\\text\{with probability \}/u);
     assert.match(math[0].latex, /\\text\{a random action\}/u);
     assert.equal(math[1].latex, String.raw`\mathrm{A B}`);
     assert.equal(math[2].latex, String.raw`\mathrm{sin x}`);
     assert.equal(math[3].latex, String.raw`\mathrm{𝑥 𝑦}`);
-    const ordinary = await parse([textRegion(content)]);
-    assert.match(ordinary[0].runs.find(run => run.type === 'math').latex, /\\mathrm\{with probability\}/u);
+    assert.equal(blocks[1].latex, String.raw`x=1 \quad \text{subject to }y>0`);
+});
+test('physical prose lines reflow across inline math while blank lines preserve paragraphs and speech boundaries', async () => {
+    const blocks = await parse([textRegion('First physical\n    line with $x$\ncontinues here.\n   \nA distinct\nparagraph.')]);
+    assert.deepEqual(blocks.map(block => block.text), ['First physical line with  continues here.', 'A distinct paragraph.']);
+    assert.deepEqual(blocks[0].runs.map(run => run.type === 'text' ? run.text : run.latex),
+        ['First physical line with ', 'x', ' continues here.']);
+    assert.equal(blocksText(blocks), 'First physical line with  continues here.\n\nA distinct paragraph.');
+    assert.equal(blocks[0].preserveWhitespace, undefined);
+});
+
+test('literal code and poetry keep meaningful line structure while surrounding prose reflows', async () => {
+    const blocks = await parse([
+        textRegion('Before\ncode.\n\n```python\nif ready:\n    run()\n```\nAfter\ncode.'),
+        { ...textRegion('A first line\n    A second line'), layoutLabel: 'poetry' },
+        { ...textRegion('First\n    Second'), preserveWhitespace: true },
+        textRegion('Explicit hard break  \nSecond line')
+    ]);
+    assert.deepEqual(blocks.map(block => [block.text, block.preserveWhitespace]), [
+        ['Before code.', undefined], ['if ready:\n    run()', true], ['After code.', undefined],
+        ['A first line\n    A second line', true], ['First\n    Second', true],
+        ['Explicit hard break  \nSecond line', true]
+    ]);
+    await assert.rejects(parse([{ ...textRegion('invalid'), preserveWhitespace: 'true' }]), /Invalid document model region/u);
+});
+
+test('nested groups and operator arguments are not mistaken for multiword equation prose', async () => {
+    const blocks = await parse([{ kind: 'formula', bbox,
+        content: String.raw`\mathrm{sin x} + \mathrm{A B} + \mathrm{long \alpha word} + \mathrm{two {nested} words}` }]);
+    assert.equal(blocks[0].latex,
+        String.raw`\mathrm{sin x} + \mathrm{A B} + \mathrm{long \alpha word} + \mathrm{two {nested} words}`);
 });

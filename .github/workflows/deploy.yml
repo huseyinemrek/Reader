@@ -28,27 +28,32 @@ jobs:
             cd "$HOME/reader"
             git pull origin main
 
-            echo "--- Node.js bağımlılıkları güncelleniyor ---"
-            cd local
-            npm install --omit=dev
+            echo "--- Ortak Node.js bağımlılıkları güncelleniyor ---"
+            npm --prefix local ci --omit=dev
 
-            # uv ve OCR ortamı eksikse otomatik hazırla
+            # İlk geçişte veriler kopyalanırken eski servisin kitap yazmasını durdur.
+            # Kaynak local/library.json, uploads ve CPU .venv-ocr silinmez.
+            if [ ! -f vps/library.json ] && [ -f local/library.json ]; then
+                if pm2 describe reader > /dev/null 2>&1; then
+                    pm2 stop reader
+                fi
+            fi
+            npm --prefix vps run migrate
+
             if ! command -v uv > /dev/null 2>&1 && [ ! -f "$HOME/.local/bin/uv" ]; then
                 echo "--- uv kuruluyor ---"
                 curl -LsSf https://astral.sh/uv/install.sh | sh
             fi
             export PATH="$HOME/.local/bin:$PATH"
 
-            if [ ! -d ".venv-ocr" ]; then
-                echo "--- Belge OCR ortamı ve modelleri hazırlanıyor ---"
-                npm run ocr:setup
+            # Oracle Ubuntu 26.04 Ampere ARM64: VPS CPU OCR korunur, CUDA kurulmaz.
+            # Mevcut Python ortamı yeniden yaratılmaz.
+            if [ ! -x local/.venv-ocr/bin/python ]; then
+                echo "--- CPU belge OCR ortamı ve modelleri hazırlanıyor ---"
+                npm --prefix vps run ocr:setup
             fi
 
-            echo "--- PM2 servisi yeniden başlatılıyor ---"
-            if pm2 describe reader > /dev/null 2>&1; then
-                pm2 restart reader --update-env
-            else
-                pm2 start server.js --name reader
-            fi
+            echo "--- Paylaşılan VPS servisi başlatılıyor ---"
+            pm2 startOrReload vps/ecosystem.config.cjs --update-env
             pm2 save
             echo "--- Dağıtım başarıyla tamamlandı ---"
