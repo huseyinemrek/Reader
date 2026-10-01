@@ -134,7 +134,7 @@
 
 #reader-view.paged-mode .pdf-page-image-column {
     top: 20px;
-    height: calc(100vh - 140px);
+    height: calc(100vh - 40px);
 }
 
 .pdf-image-footer {
@@ -223,20 +223,6 @@
     cursor: text;
 }
 
-
-.pdf-source-selection-layer {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    pointer-events: none;
-}
-
-.pdf-source-selection-highlight {
-    position: absolute;
-    background: rgba(45, 118, 230, 0.3);
-    transform-origin: 0 0;
-    pointer-events: none;
-}
 
 .pdf-link-layer {
     position: absolute;

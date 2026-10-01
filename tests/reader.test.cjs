@@ -739,7 +739,8 @@ for (const mode of ['local', 'vps', 'hosting']) {
         });
 
         await t.test('source PDF copy stays out of speech and text scrolling follows the source', async () => {
-            await page.setViewport({ width: 1400, height: 800 });
+            // Both source and text must overflow despite the full-height paged surface.
+            await page.setViewport({ width: 1400, height: 600 });
             await openPdf(page, base);
             await openSidebar(page, 'settings');
             await page.select('#pdf-layout', 'text-right');
@@ -758,16 +759,19 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 return {x: rect.left + 44 / 500 * rect.width, y: rect.top + 31 / 650 * rect.height};
             });
             await page.mouse.click(word.x, word.y, { count: 2 });
-            await page.waitForSelector('.pdf-source-selection-highlight', {timeout: 5000});
+            await page.waitForFunction(() => window.getSelection().toString().trim() === 'Native', {timeout: 5000});
+            const selectedWord = await page.evaluate(() => window.getSelection().toString());
             await context.overridePermissions(base, ['clipboard-read', 'clipboard-write']);
             await page.keyboard.down('Control');
             await page.keyboard.press('c');
             await page.keyboard.up('Control');
-            assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'Native');
+            assert.equal(await page.evaluate(() => navigator.clipboard.readText()), selectedWord);
             await page.keyboard.down('Control');
             await page.keyboard.press('a');
             await page.keyboard.up('Control');
-            await page.click('.pdf-copy-btn');
+            await page.keyboard.down('Control');
+            await page.keyboard.press('c');
+            await page.keyboard.up('Control');
             const copied = await page.evaluate(() => navigator.clipboard.readText());
             assert.match(copied, /Native typography document, page 2\./);
             assert.match(copied, /He whispered remember me, then fell silent\./);
@@ -781,8 +785,10 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 assert.equal(spoken.split('Native typography document, page 2.').length - 1, 1,
                     'The source must not add a second copy of book prose to the speech tree');
             } finally { await ax.detach(); }
-            await page.click('[data-pdf-zoom="in"]');
-            await page.click('.pdf-copy-btn');
+            await page.keyboard.down('Control');
+            await page.keyboard.press('+');
+            await page.keyboard.press('c');
+            await page.keyboard.up('Control');
             assert.equal(await page.evaluate(() => navigator.clipboard.readText()), copied,
                 'Zoom must preserve the selected source text');
             for (const readingMode of ['paged', 'scroll']) {
@@ -791,6 +797,11 @@ for (const mode of ['local', 'vps', 'hosting']) {
                     await page.select('#pdf-layout', layout);
                     await page.click(readingMode === 'paged' ? '#mode-paged-btn' : '#mode-scroll-btn');
                     await page.click('#settings-close');
+                    await page.waitForFunction(() => {
+                        const panel = document.getElementById('settings-sidebar');
+                        return panel.getAttribute('aria-hidden') === 'true' &&
+                            getComputedStyle(panel).visibility === 'hidden';
+                    }, {timeout: 5000});
                     const source = '#pdf-page-2 .pdf-original-viewport';
                     await page.click('#pdf-page-2 [data-pdf-zoom="fill"]');
                     await page.waitForFunction(selector => {
@@ -841,6 +852,39 @@ for (const mode of ['local', 'vps', 'hosting']) {
             });
             await page.click('#settings-close');
             await page.setViewport({width: 1400, height: 960});
+        });
+
+        await t.test('source PDF horizontal pan survives next and previous pages', async () => {
+            await openPdf(page, base);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-right');
+            await page.click('#mode-paged-btn');
+            await page.click('#settings-close');
+            for (let step = 0; step < 5; step++) await page.click('[data-pdf-zoom="in"]');
+            const source = () => page.$eval('.active-pdf-page .pdf-original-viewport', element => ({
+                range: element.scrollWidth - element.clientWidth,
+                fraction: element.scrollLeft / (element.scrollWidth - element.clientWidth)
+            }));
+            assert.ok((await source()).range > 100, 'The source must actually overflow horizontally');
+            for (const fraction of [0.5, 1]) {
+                await page.$eval('.active-pdf-page .pdf-original-viewport', (element, fraction) => {
+                    element.scrollLeft = fraction * (element.scrollWidth - element.clientWidth);
+                }, fraction);
+                await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+                for (const number of [3, 2]) {
+                    await jumpTo(page, number);
+                    await page.waitForFunction(({number, fraction}) => {
+                        const original = document.querySelector(`#pdf-page-${number} .pdf-original-viewport`);
+                        if (!original || original.scrollWidth - original.clientWidth <= 100) return false;
+                        return Math.abs(original.scrollLeft / (original.scrollWidth - original.clientWidth) - fraction) < 0.02;
+                    }, {timeout: 5000}, {number, fraction});
+                    assert.ok(Math.abs((await source()).fraction - fraction) < 0.02);
+                }
+            }
+            await page.click('[data-pdf-zoom="fit"]');
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-only');
+            await page.click('#settings-close');
         });
 
         await t.test('real background uploads accept a second file while reading without route or position resets', async () => {

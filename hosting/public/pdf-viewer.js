@@ -3,12 +3,17 @@ import { PdfSourceSelection } from './pdf-source-selection.mjs';
 // Render only visible tiles at the current zoom and device pixel ratio. The page
 // surface can grow to 500% without allocating a page-sized high-resolution canvas.
 window.PdfPageViewer = class PdfPageViewer {
-    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate, onLayout, textSource = null} = {}) {
+    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate, onLayout,
+        horizontalPan = 0, onHorizontalPan, textSource = null} = {}) {
         this.column = column;
         this.zoom = zoom;
         this.onZoom = onZoom;
         this.onNavigate = onNavigate;
         this.onLayout = onLayout;
+        this.horizontalPan = Math.max(0, Math.min(1, horizontalPan));
+        this.onHorizontalPan = onHorizontalPan;
+        this.horizontalOverflow = 0;
+        this.horizontalPosition = 0;
         this.pdfDocument = pdfDocument;
         this.tiles = new Map();
         this.links = [];
@@ -69,13 +74,6 @@ window.PdfPageViewer = class PdfPageViewer {
         this.plus = button('in', '+', 'PDF yakınlaştır (Ctrl +)');
         button('fit', 'Sığdır', 'PDF sayfasının tamamını sığdır (Ctrl 0)');
         button('fill', 'Doldur', 'PDF sayfasını sütun genişliğine doldur');
-        const copy = document.createElement('button');
-        copy.type = 'button';
-        copy.className = 'mode-btn pdf-copy-btn';
-        copy.textContent = 'Kopyala';
-        copy.title = 'PDF üzerinde seçilen metni kopyala (Ctrl C)';
-        copy.addEventListener('click', () => this.selection?.copy());
-        this.controls.appendChild(copy);
         this.footer.appendChild(this.controls);
 
         this.status = document.createElement('div');
@@ -91,7 +89,11 @@ window.PdfPageViewer = class PdfPageViewer {
                 this.renderVisible();
             });
         };
-        this.viewport.addEventListener('scroll', this.schedule, {passive: true});
+        this.scroll = () => {
+            this.captureHorizontalPan();
+            this.schedule();
+        };
+        this.viewport.addEventListener('scroll', this.scroll, {passive: true});
         // Capture also covers the paged book viewport and mobile comparison pane.
         window.addEventListener('scroll', this.schedule, {capture: true, passive: true});
         window.addEventListener('resize', this.schedule);
@@ -182,6 +184,11 @@ window.PdfPageViewer = class PdfPageViewer {
         this.onZoom?.(next);
         this.layout();
         this.viewport.scrollLeft = next === null || next === 'fill' ? 0 : x * this.scale - this.viewport.clientWidth / 2;
+        this.horizontalPosition = this.viewport.scrollLeft;
+        // Keep the zoom's center anchor through its ensuing resize, without
+        // treating a programmatic offset as a new session pan preference.
+        if (this.horizontalOverflow) this.horizontalPan = Math.max(0, Math.min(1,
+            this.horizontalPosition / this.horizontalOverflow));
         if (next !== 'fill') this.viewport.scrollTop = next === null ? 0 : y * this.scale - this.viewport.clientHeight / 2;
         this.schedule();
     }
@@ -198,7 +205,20 @@ window.PdfPageViewer = class PdfPageViewer {
         this.schedule();
     }
 
+    captureHorizontalPan() {
+        if (this.destroyed) return;
+        const overflow = Math.max(0, this.viewport.scrollWidth - this.viewport.clientWidth);
+        const position = this.viewport.scrollLeft;
+        // Geometry changes can clamp scrollLeft before layout runs. Delayed
+        // programmatic scroll events likewise must not replace the user's pan.
+        if (!overflow || overflow !== this.horizontalOverflow || position === this.horizontalPosition) return;
+        this.horizontalPosition = position;
+        this.horizontalPan = Math.max(0, Math.min(1, position / overflow));
+        this.onHorizontalPan?.(this.horizontalPan);
+    }
+
     layout() {
+        this.captureHorizontalPan();
         const width = this.viewport.clientWidth;
         const height = this.viewport.clientHeight;
         if (!this.page || !width || !height) return false;
@@ -224,6 +244,12 @@ window.PdfPageViewer = class PdfPageViewer {
         this.plus.disabled = scale >= 5;
         this.layoutWidth = width;
         this.layoutHeight = height;
+        const overflow = Math.max(0, this.viewport.scrollWidth - this.viewport.clientWidth);
+        if (changed || overflow !== this.horizontalOverflow) {
+            this.horizontalOverflow = overflow;
+            this.viewport.scrollLeft = this.horizontalPan * overflow;
+            this.horizontalPosition = this.viewport.scrollLeft;
+        }
         if (changed) this.onLayout?.();
         return true;
     }
@@ -391,12 +417,13 @@ window.PdfPageViewer = class PdfPageViewer {
     }
 
     destroy() {
+        this.captureHorizontalPan();
         this.destroyed = true;
         cancelAnimationFrame(this.frame);
         this.clearTiles();
         this.selection?.destroy();
         this.resizeObserver.disconnect();
-        this.viewport.removeEventListener('scroll', this.schedule);
+        this.viewport.removeEventListener('scroll', this.scroll);
         window.removeEventListener('scroll', this.schedule, true);
         window.removeEventListener('resize', this.schedule);
     }

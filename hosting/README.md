@@ -109,7 +109,9 @@ PDF.js 6 ile yerleşik font metadata’sı okunur; normal/italik/oblik/kalın ve
 
 **Sığdır** sayfanın tamamını, **Doldur** sütun genişliğini kullanır; Doldur ekran/ayırıcı değişimini izler. Metin kaydırması büyütülmüş kaynağın aynı sayfadaki başlangıç/orta/son oranını izler, paragrafla birebir eşleştirme değildir. Kaynağı elle kaydırmak metni değiştirmez; sonraki metin kaydırması eşzamanlamayı sürdürür.
 
-Kaynak PDF’nin yerleşik metni fareyle seçilip **Ctrl/Cmd+C** veya **Kopyala** ile kopyalanır; alan odaktayken **Ctrl/Cmd+A** sayfa metnini seçer. Kaynak metin ikinci bir DOM metin katmanına eklenmez; boş görsel vurgu kutuları, metin/erişilebilirlik ağacı üzerinden sesli okumada çift kitap metni oluşmasını önler. Karakter konumu PDF.js öğe dönüşümü ve göreli ölçüyle belirlenir. Hosting’de OCR yoktur; yalnız taranmış sayfalarda kaynak üzerinden kopyalanabilir metin üretilemez.
+Kaynak PDF’de yatay kaydırma oranı kitap açıkken sonraki/önceki sayfalara ve sütun genişliği değişimine taşınır. Sayfalı okuma üst/alt koyu boşluk bırakmadan tam ekran yüksekliğini kullanır; yan boşluklar korunur, en sağdaki scrollbar yalnız görsel olarak gizlenir.
+
+Kaynak PDF’nin yerleşik metni tarayıcının doğal seçimiyle, **Ctrl/Cmd+C** veya sağ tık menüsündeki **Kopyala** ile kopyalanır; ayrı Kopyala düğmesi kaldırılmıştır. Alan odaktayken **Ctrl/Cmd+A** kaynak sayfa metnini seçer. PDF.js `TextLayer`, `aria-hidden` kapalı Shadow DOM içindedir; kaynak light-DOM metni boş ve erişilebilirlik ağacında kitap metni tek kopyadır. Karakter hizasını PDF.js sağlar. Hosting’de OCR yoktur; yalnız taranmış sayfalarda kaynak üzerinden kopyalanabilir metin üretilmez.
 
 Ortak `pdf-graphics.mjs` resim ve vektör çizimleri tarayıcıda kaynak PDF’den kırpar; döndürme, clipping ve maskeler korunur. Görseller yalnız metin düzeninde de kaynak sırasıyla metin arasına girer; görsel içindeki etiketler yinelenmez. Yalnız resim içeren kapak/sayfa gerçek görüntüyü gösterir, metin veya OCR uydurulmaz. Bu işlem mevcut Range PDF kaynağını kullanır; Storage’a ek dosya yazmaz ve eski kitabı tekrar yüklemeyi gerektirmez.
 

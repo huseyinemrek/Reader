@@ -5,6 +5,7 @@ export function createPdfLayoutView({
     captureAnchor, restoreAnchor, onSettingsChange, onInteraction, onNavigate
 }) {
     let zoom = null;
+    let horizontalPan = 0;
     let drag = null;
     let suppressClickUntil = 0;
     let destroyed = false;
@@ -181,6 +182,9 @@ export function createPdfLayoutView({
         }
         if (!wanted) return;
         if (!state.viewer) {
+            // Capture scrolls whose browser event has not fired yet before a
+            // replacement viewer reads the shared session preference.
+            for (const [, candidate] of getStates()) candidate.viewer?.captureHorizontalPan?.();
             const source = {document: pdfDocument, page: pageNumber, progress: null, manual: false};
             viewerSources.set(state, source);
             state.viewer = new window.PdfPageViewer(column, pdfDocument, pageNumber, {
@@ -190,6 +194,10 @@ export function createPdfLayoutView({
                 }, onNavigate,
                 onLayout: () => {
                     if (!destroyed && !drag && viewerSources.get(state) === source) syncReading(section, state, false, true);
+                },
+                horizontalPan,
+                onHorizontalPan: fraction => {
+                    if (!destroyed && viewerSources.get(state) === source) horizontalPan = fraction;
                 },
                 textSource: section.dataset.textSource
             });
@@ -307,6 +315,7 @@ export function createPdfLayoutView({
         lastWindowTop = window.scrollY;
         lastBookTop = bookViewport?.scrollTop || 0;
         zoom = null;
+        horizontalPan = 0;
         suppressClickUntil = 0;
     }
 
