@@ -38,12 +38,7 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText, lin
         else if (operation === OPS.setFillRGBColor) fillColor = operators.argsArray[index][0];
         else if (operation === OPS.setFillColorN || operation === OPS.setFillTransparent) fillColor = null;
         if (!graphics.has(operation) || bounds.isEmpty(index)) continue;
-        // A clipping path is not a visible illustration. PDF.js records its
-        // drawing dependencies, so only paths that actually paint are selected.
         if (operation === OPS.constructPath && operators.argsArray[index][0] === OPS.endPath) continue;
-        // White fills are page/paragraph backgrounds, not illustration seeds.
-        // Keep stroked outlines and actual images; their source crops still
-        // include any white knockout shapes painted over them.
         if (operation === OPS.constructPath && fillColor === '#ffffff' &&
             [OPS.fill, OPS.eoFill].includes(operators.argsArray[index][0])) continue;
         let box = {
@@ -65,6 +60,7 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText, lin
                 box = { x0: Math.min(box.x0, candidate.x0), y0: Math.min(box.y0, candidate.y0),
                     x1: Math.max(box.x1, candidate.x1), y1: Math.max(box.y1, candidate.y1),
                     hasImage: candidate.hasImage || box.hasImage };
+                regions.splice(other, 1);
                 other = 0;
             } else other++;
         }
