@@ -28,7 +28,23 @@ with pymupdf.open() as doc:
     nested = doc.get_outline_xrefs()[1]
     doc.xref_set_key(nested, 'A', 'null')
     doc.xref_set_key(nested, 'Dest', '(nested-section)')
+    # Preserve the no-outline fixture's original save path and contents.
     doc.save(root / 'typography-outline.pdf')
     doc.set_toc([])
     doc.save(root / 'without-outline.pdf')
+
+    doc.set_toc([[1, 'First chapter', 2], [2, 'Nested section', 3], [1, 'Last chapter', 4]])
+    nested = doc.get_outline_xrefs()[1]
+    doc.xref_set_key(nested, 'A', 'null')
+    doc.xref_set_key(nested, 'Dest', '(nested-section)')
+    first_page = doc[0]
+    first_page.insert_text((36, 360), 'First linked chapter', fontname='tiro', fontsize=12)
+    first_page.insert_text((36, 380), 'Second linked chapter', fontname='tiro', fontsize=12)
+    first_page.insert_text((36, 400), 'Project website', fontname='tiro', fontsize=12)
+    for label, target_page in [('First linked chapter', 1), ('Second linked chapter', 2)]:
+        first_page.insert_link({'kind': pymupdf.LINK_GOTO, 'page': target_page,
+                                'from': first_page.search_for(label)[0]})
+    first_page.insert_link({'kind': pymupdf.LINK_URI, 'uri': 'https://example.org/',
+                            'from': first_page.search_for('Project website')[0]})
+    doc.save(root / 'typography-outline.pdf')
 print('Created mixed-font PDFs with nested/named destinations and without bookmarks.')

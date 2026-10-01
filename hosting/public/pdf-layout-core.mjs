@@ -27,7 +27,69 @@ function weight(text) {
     return Math.max(1, (text.match(/[\p{L}\p{N}]/gu) || []).length);
 }
 
-export function nativeBlocks(content, viewport) {
+function safePdfUrl(value) {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    try {
+        const url = new URL(value);
+        return ['http:', 'https:', 'mailto:'].includes(url.protocol) && !url.username && !url.password
+            ? url.href : null;
+    } catch { return null; }
+}
+
+function viewportRectangle(rectangle, viewport) {
+    const [a, b, c, d, e, f] = viewport.transform;
+    const corners = [
+        [rectangle[0], rectangle[1]], [rectangle[0], rectangle[3]],
+        [rectangle[2], rectangle[1]], [rectangle[2], rectangle[3]]
+    ].map(([x, y]) => ({ x: a * x + c * y + e, y: b * x + d * y + f }));
+    return {
+        x0: Math.min(...corners.map(point => point.x)), y0: Math.min(...corners.map(point => point.y)),
+        x1: Math.max(...corners.map(point => point.x)), y1: Math.max(...corners.map(point => point.y))
+    };
+}
+
+function linkForBox(box, links) {
+    let best;
+    let bestCoverage = 0.35;
+    for (const link of links) {
+        const overlapWidth = Math.max(0, Math.min(box.x1, link.bbox.x1) - Math.max(box.x0, link.bbox.x0));
+        const overlapHeight = Math.max(0, Math.min(box.y1, link.bbox.y1) - Math.max(box.y0, link.bbox.y0));
+        const coverage = overlapWidth * overlapHeight / Math.max(1, (box.x1 - box.x0) * (box.y1 - box.y0));
+        if (coverage > bestCoverage) {
+            best = link;
+            bestCoverage = coverage;
+        }
+    }
+    return best && (best.page !== undefined ? { page: best.page } : { url: best.url });
+}
+
+/** Resolve link annotations and express their rectangles in the same page coordinates as native text. */
+export async function nativePdfLinks(page, pdfDocument, viewport = page.getViewport({ scale: 1 })) {
+    const annotations = await page.getAnnotations({ intent: 'display' });
+    const links = [];
+    for (const annotation of annotations) {
+        if (annotation.subtype !== 'Link' || !Array.isArray(annotation.rect) || annotation.rect.length !== 4) continue;
+        let target;
+        const url = safePdfUrl(annotation.url);
+        if (url) target = { url };
+        else if (annotation.dest !== undefined && pdfDocument) {
+            try {
+                const destination = typeof annotation.dest === 'string'
+                    ? await pdfDocument.getDestination(annotation.dest) : annotation.dest;
+                const reference = Array.isArray(destination) ? destination[0] : null;
+                const index = Number.isInteger(reference) ? reference
+                    : reference && typeof reference === 'object' ? await pdfDocument.getPageIndex(reference) : -1;
+                if (Number.isInteger(index) && index >= 0 && index < pdfDocument.numPages) target = { page: index + 1 };
+            } catch { /* An unresolved PDF action is left inert. */ }
+        }
+        if (!target) continue;
+        const bbox = viewportRectangle(annotation.rect, viewport);
+        if (validBbox(bbox)) links.push({ bbox, ...target });
+    }
+    return links;
+}
+
+export function nativeBlocks(content, viewport, links = []) {
     const lines = [];
     const matrix = viewport.transform;
     const point = (x, y) => ({ x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] });
@@ -52,11 +114,17 @@ export function nativeBlocks(content, viewport) {
             bbox.x0 >= line.bbox.x0 - size * 0.25 && bbox.x0 - line.bbox.x1 < Math.max(size, line.size) * 3;
         const text = clean(item.str);
         if (!sameRow) {
-            line = { bbox, baselineY: origin.y, size, text: '', parts: [] };
+            line = { bbox, baselineY: origin.y, size, text: '', parts: [], linkedWeight: 0, textWeight: 0 };
             lines.push(line);
         }
         const needsSpace = line.parts.length && (bbox.x0 - line.bbox.x1 > size * 0.08 || /^\s/u.test(item.str) || /\s$/u.test(previousItem.str));
         const part = { text: `${needsSpace ? ' ' : ''}${text}`, size, bbox };
+        const link = linkForBox(bbox, links);
+        if (link) {
+            part.link = link;
+            line.linkedWeight += text.length;
+        }
+        line.textWeight += text.length;
         for (const key of FONT_FIELDS) {
             const value = key === 'fontName' ? style.sourceFontName : style[key];
             if (value !== undefined && value !== '') part[key] = value;
@@ -67,6 +135,7 @@ export function nativeBlocks(content, viewport) {
         line.size = median(line.parts.map(run => ({ value: run.size, weight: weight(run.text) })));
         previousItem = item;
     }
+    for (const line of lines) line.keepSeparate = line.textWeight > 0 && line.linkedWeight / line.textWeight >= 0.8;
     return layoutBlocks(lines);
 }
 
@@ -98,7 +167,7 @@ function layoutBlocks(lines) {
             const overlap = Math.min(right, line.bbox.x1) - Math.max(left, line.bbox.x0);
             const indented = line.bbox.x0 - left > size * 0.8;
             const previousShort = previous.bbox.x1 - previous.bbox.x0 < width * 0.85;
-            merge = distance > size * 0.5 && distance <= leading * size * 1.22 &&
+            merge = !previous.keepSeparate && !line.keepSeparate && distance > size * 0.5 && distance <= leading * size * 1.22 &&
                 Math.abs(line.size / previous.size - 1) < 0.25 && overlap > Math.min(width, line.bbox.x1 - line.bbox.x0) * 0.5 &&
                 !indented && !previousShort;
         }
@@ -109,14 +178,16 @@ function layoutBlocks(lines) {
     return groups.map(group => {
         const runs = [];
         let bbox = group[0].bbox;
-        const append = (text, size, typography) => {
+        const append = (text, size, typography, link) => {
             if (!text) return;
             const fontScale = Math.round(size / reference * 1000) / 1000;
             const previous = runs[runs.length - 1];
-            if (previous && previous.fontScale === fontScale && FONT_FIELDS.every(key => previous[key] === typography[key])) previous.text += text;
+            const sameLink = JSON.stringify(previous?.link) === JSON.stringify(link);
+            if (previous && previous.fontScale === fontScale && sameLink && FONT_FIELDS.every(key => previous[key] === typography[key])) previous.text += text;
             else {
                 const run = { type: 'text', text, fontScale };
                 for (const key of FONT_FIELDS) if (typography[key] !== undefined) run[key] = typography[key];
+                if (link) run.link = link;
                 runs.push(run);
             }
         };
@@ -143,7 +214,7 @@ function layoutBlocks(lines) {
                     }
                 } else append(' ', line.size, line.parts[0]);
             }
-            for (const part of line.parts) append(part.text, part.size, part);
+            for (const part of line.parts) append(part.text, part.size, part, part.link);
         });
         const block = { type: 'text', text: runs.map(run => run.text).join(''), bbox, runs };
         sourceLines.set(block, { lines: group, reference });
@@ -174,6 +245,12 @@ function validMath(math, display) {
         (math.label === undefined || typeof math.label === 'string');
 }
 
+function validLink(link) {
+    if (!link || typeof link !== 'object') return false;
+    if (Number.isSafeInteger(link.page) && link.page >= 1 && link.url === undefined) return true;
+    return link.page === undefined && safePdfUrl(link.url) !== null;
+}
+
 export function validBlocks(blocks, text) {
     return Array.isArray(blocks) && blocks.every(block => {
         if (!block) return false;
@@ -186,7 +263,8 @@ export function validBlocks(blocks, text) {
                     (run.fontName === undefined || typeof run.fontName === 'string' && run.fontName.trim().length > 0 && !/^g_d\d+_f/u.test(run.fontName)) &&
                     (run.fontFamily === undefined || typeof run.fontFamily === 'string' && run.fontFamily.trim().length > 0) &&
                     (run.fontStyle === undefined || ['normal', 'italic', 'oblique'].includes(run.fontStyle)) &&
-                    (run.fontWeight === undefined || Number.isFinite(run.fontWeight) && run.fontWeight >= 1 && run.fontWeight <= 1000))) &&
+                    (run.fontWeight === undefined || Number.isFinite(run.fontWeight) && run.fontWeight >= 1 && run.fontWeight <= 1000) &&
+                    (run.link === undefined || validLink(run.link)))) &&
             block.runs.filter(run => run.type === 'text').map(run => run.text).join('') === block.text;
     }) && blocksText(blocks) === text;
 }

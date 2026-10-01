@@ -180,6 +180,26 @@
     background: #ffffff;
 }
 
+.pdf-link-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.pdf-original-link {
+    position: absolute;
+    display: block;
+    pointer-events: auto;
+    background: transparent;
+    cursor: pointer;
+}
+
+.pdf-original-link:focus-visible {
+    outline: 2px solid #1769d2;
+    outline-offset: 1px;
+}
+
 .pdf-original-tile {
     position: absolute;
     display: block;
@@ -200,6 +220,13 @@
 
 .pdf-text-block {
     white-space: normal;
+}
+
+.pdf-text-block a.pdf-source-link {
+    color: inherit;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.12em;
 }
 
 .pdf-text-block[data-preserve-whitespace="true"],

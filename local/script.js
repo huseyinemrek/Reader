@@ -488,6 +488,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         getDocument: () => currentPdfDoc, getCurrentPage: () => currentPdfPage,
         getStates: () => pdfPageStates,
         captureAnchor: capturePdfReadingAnchor, restoreAnchor: restorePdfReadingAnchor,
+        onNavigate: page => goToPage(page),
         onSettingsChange: () => localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings)),
         onInteraction: ({ type }) => {
             if (['drag-end', 'keyboard', 'zoom'].includes(type)) {
@@ -1903,7 +1904,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function makePdfPageText(result, assetToken) {
         const text = result.source === 'native'
-            ? renderNativePdfBlocks(result.blocks) : document.createElement('div');
+            ? renderNativePdfBlocks(result.blocks, document, {onNavigate: page => goToPage(page)}) : document.createElement('div');
         if (result.source !== 'native') for (const block of result.blocks) {
             if (block.type === 'image') {
                 const figure = document.createElement('figure');

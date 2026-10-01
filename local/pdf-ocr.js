@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { createRequire } = require('module');
 const crypto = require('crypto');
-const { nativeBlocks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
+const { nativeBlocks, nativePdfLinks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 const { nativeTextContent } = require('../hosting/public/pdf-fonts.mjs');
 const createDocumentOcr = require('./document-ocr');
 const { documentBlocks } = require('./document-blocks');
@@ -228,7 +228,9 @@ function createPdfOcr(uploadsDirectory) {
             const sourcePage = await document.getPage(page);
             const unit = sourcePage.getViewport({ scale: 1 });
             const viewport = sourcePage.getViewport({ scale: Math.min(BASE_RENDER_SCALE, MAX_RENDER_DIMENSION / Math.max(unit.width, unit.height)) });
-            const blocks = nativeBlocks(await nativeTextContent(sourcePage), viewport);
+            const content = await nativeTextContent(sourcePage);
+            const links = await nativePdfLinks(sourcePage, document, viewport);
+            const blocks = nativeBlocks(content, viewport, links);
             if (sourceVersion(await getPdfStat(resolvedPdfPath)) !== version) throw makeError(409, 'The PDF source changed.');
             return {
                 page, text: blocksText(blocks), blocks, source: 'native', confidence: null,

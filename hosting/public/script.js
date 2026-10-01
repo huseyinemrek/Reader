@@ -164,6 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
         getDocument: () => currentPdfDoc, getCurrentPage: () => currentPdfPage,
         getStates: () => pdfPageStates,
         captureAnchor: capturePdfReadingAnchor, restoreAnchor: restorePdfReadingAnchor,
+        onNavigate: page => goToPage(page),
         onSettingsChange: () => localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings)),
         onInteraction: ({ type }) => {
             if (['drag-end', 'keyboard', 'zoom'].includes(type)) {
@@ -1511,10 +1512,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function createPdfPageSection(pageNumber) {
         const page = await currentPdfDoc.getPage(pageNumber);
-        const blocks = await getNativePdfBlocks(page);
+        const blocks = await getNativePdfBlocks(page, currentPdfDoc);
         const section = createPdfPage(pageNumber);
         const text = section.querySelector('.pdf-page-text');
-        const native = renderNativePdfBlocks(blocks);
+        const native = renderNativePdfBlocks(blocks, document, {onNavigate: page => goToPage(page)});
         while (native.firstChild) text.appendChild(native.firstChild);
         if (!text.children.length) {
             const notice = document.createElement('p');

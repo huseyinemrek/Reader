@@ -320,6 +320,41 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 { timeout: 10000 });
         });
 
+        await t.test('native PDF links are clickable in text and source while linked rows stay separate', async () => {
+            await openPdf(page, base, 'book_test_typography', 1);
+            await page.waitForFunction(() => document.querySelectorAll('#pdf-text-1 a.pdf-source-link').length === 3,
+                { timeout: 10000 });
+            const links = await page.$$eval('#pdf-text-1 a.pdf-source-link', anchors => anchors.map(anchor => ({
+                text: anchor.textContent.trim(), page: Number(anchor.dataset.pdfPage) || null,
+                href: anchor.href, target: anchor.target, rel: anchor.rel,
+                paragraph: anchor.closest('.pdf-text-block')?.textContent.trim(),
+                decoration: getComputedStyle(anchor).textDecorationLine
+            })));
+            assert.deepEqual(links.map(({ text, page: destination, paragraph }) => [text, destination, paragraph]), [
+                ['First linked chapter', 2, 'First linked chapter'],
+                ['Second linked chapter', 3, 'Second linked chapter'],
+                ['Project website', null, 'Project website']
+            ]);
+            assert.ok(links.every(link => link.decoration.includes('underline')));
+            assert.equal(links[2].href, 'https://example.org/');
+            assert.equal(links[2].target, '_blank');
+            assert.match(links[2].rel, /noopener/u);
+
+            await page.click('#pdf-text-1 a[data-pdf-page="2"]');
+            await page.waitForFunction(() => Number(new URLSearchParams(location.search).get('page')) === 2 &&
+                document.querySelector('#pdf-text-2')?.textContent.includes('page 2.'), { timeout: 10000 });
+
+            await openPdf(page, base, 'book_test_typography', 1);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-right');
+            await page.click('#settings-close');
+            await page.waitForFunction(() => document.querySelectorAll('.pdf-link-layer a').length === 3,
+                { timeout: 10000 });
+            await page.locator('.pdf-link-layer a[data-pdf-page="3"]').click();
+            await page.waitForFunction(() => Number(new URLSearchParams(location.search).get('page')) === 3 &&
+                document.querySelector('#pdf-text-3')?.textContent.includes('page 3.'), { timeout: 10000 });
+        });
+
         await t.test('PDF without bookmarks never displays stale library contents', async () => {
             await openPdf(page, base, 'book_test_no_outline', 1);
             await openSidebar(page, 'toc');

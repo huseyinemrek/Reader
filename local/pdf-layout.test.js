@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { nativeBlocks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
+const { nativeBlocks, nativePdfLinks, blocksText, validBlocks } = require('../hosting/public/pdf-layout-core.mjs');
 
 function consistent(blocks) {
     assert.equal(validBlocks(blocks, blocksText(blocks)), true);
@@ -63,6 +63,28 @@ test('column reading order is retained without interleaving equal-y rows', () =>
         item('Right column next', 200, 787, 10, 100)
     ] }, viewport);
     assert.deepEqual(blocks.map(block => block.text), ['Left column first Left column next', 'Right column first Right column next']);
+    consistent(blocks);
+});
+
+test('linked native PDF rows keep their line breaks and resolve safe internal destinations', async () => {
+    const page = {
+        getViewport: () => ({ transform: [1, 0, 0, -1, 0, 900] }),
+        getAnnotations: async () => [
+            { subtype: 'Link', rect: [99, 798, 221, 810], dest: [{ num: 3, gen: 0 }, 'XYZ', 0, 0, null] },
+            { subtype: 'Link', rect: [99, 781, 231, 793], url: 'https://example.org/' },
+            { subtype: 'Link', rect: [99, 764, 231, 776], url: 'javascript:alert(1)' }
+        ]
+    };
+    const pdfDocument = { numPages: 4, getPageIndex: async reference => reference.num - 1 };
+    const links = await nativePdfLinks(page, pdfDocument);
+    assert.deepEqual(links.map(({ page: destination, url }) => destination ?? url), [3, 'https://example.org/']);
+
+    const blocks = nativeBlocks({ items: [
+        item('First linked chapter', 100, 800, 10, 120),
+        item('Second linked chapter', 100, 783, 10, 130)
+    ] }, viewport, links);
+    assert.deepEqual(blocks.map(block => block.text), ['First linked chapter', 'Second linked chapter']);
+    assert.deepEqual(blocks.map(block => block.runs[0].link), [{ page: 3 }, { url: 'https://example.org/' }]);
     consistent(blocks);
 });
 

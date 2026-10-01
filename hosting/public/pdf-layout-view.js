@@ -2,7 +2,7 @@
 // Page assembly, OCR cancellation, and reading-position persistence stay with the reader.
 export function createPdfLayoutView({
     root, getSettings, getDocument, getCurrentPage, getStates,
-    captureAnchor, restoreAnchor, onSettingsChange, onInteraction
+    captureAnchor, restoreAnchor, onSettingsChange, onInteraction, onNavigate
 }) {
     let zoom = null;
     let drag = null;
@@ -82,7 +82,7 @@ export function createPdfLayoutView({
                 zoom, onZoom: value => {
                     zoom = value;
                     notify('zoom');
-                }
+                }, onNavigate
             });
             viewerSources.set(state, {document: pdfDocument, page: pageNumber});
         } else state.viewer.schedule();

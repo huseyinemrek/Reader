@@ -1,11 +1,14 @@
 // Render only visible tiles at the current zoom and device pixel ratio. The page
 // surface can grow to 500% without allocating a page-sized high-resolution canvas.
 window.PdfPageViewer = class PdfPageViewer {
-    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom} = {}) {
+    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate} = {}) {
         this.column = column;
         this.zoom = zoom;
         this.onZoom = onZoom;
+        this.onNavigate = onNavigate;
+        this.pdfDocument = pdfDocument;
         this.tiles = new Map();
+        this.links = [];
         this.destroyed = false;
         this.generation = 0;
         this.frame = 0;
@@ -38,6 +41,10 @@ window.PdfPageViewer = class PdfPageViewer {
         this.viewport.setAttribute('aria-label', 'Sayfa ' + pageNumber + ' — orijinal PDF; kaydırarak inceleyin');
         this.surface = document.createElement('div');
         this.surface.className = 'pdf-original-surface';
+        this.linkLayer = document.createElement('div');
+        this.linkLayer.className = 'pdf-link-layer';
+        this.linkLayer.setAttribute('aria-label', 'PDF bağlantıları');
+        this.surface.appendChild(this.linkLayer);
         this.viewport.appendChild(this.surface);
         this.status = document.createElement('div');
         this.status.className = 'pdf-render-status';
@@ -60,6 +67,7 @@ window.PdfPageViewer = class PdfPageViewer {
             if (this.destroyed) return;
             this.page = page;
             this.base = page.getViewport({scale: 96 / 72});
+            void this.loadLinks();
             this.schedule();
         }).catch(error => {
             if (!this.destroyed) this.showError(error);
@@ -95,10 +103,88 @@ window.PdfPageViewer = class PdfPageViewer {
             this.surface.style.width = this.pageViewport.width + 'px';
             this.surface.style.height = this.pageViewport.height + 'px';
         }
+        this.positionLinks();
         this.output.textContent = Math.round(scale * 100) + '%' + (this.zoom === null ? ' · Sığdır' : '');
         this.minus.disabled = scale <= 0.25;
         this.plus.disabled = scale >= 5;
         return true;
+    }
+
+    async loadLinks() {
+        const page = this.page;
+        try {
+            const annotations = await page.getAnnotations({intent: 'display'});
+            if (this.destroyed || page !== this.page) return;
+            for (const annotation of annotations) {
+                if (annotation.subtype !== 'Link' || !Array.isArray(annotation.rect) || annotation.rect.length !== 4) continue;
+                const url = this.safeLinkUrl(annotation.url);
+                let target = url ? {url} : null;
+                if (!target && annotation.dest !== undefined) {
+                    try {
+                        const destination = typeof annotation.dest === 'string'
+                            ? await this.pdfDocument.getDestination(annotation.dest) : annotation.dest;
+                        const reference = Array.isArray(destination) ? destination[0] : null;
+                        const index = Number.isInteger(reference) ? reference
+                            : reference && typeof reference === 'object' ? await this.pdfDocument.getPageIndex(reference) : -1;
+                        if (Number.isInteger(index) && index >= 0 && index < this.pdfDocument.numPages) target = {page: index + 1};
+                    } catch { /* An unresolved PDF action is left inert. */ }
+                }
+                if (!target || this.destroyed || page !== this.page) continue;
+                const anchor = document.createElement('a');
+                anchor.className = 'pdf-original-link';
+                anchor.setAttribute('aria-label', annotation.contents || annotation.title || 'PDF bağlantısı');
+                if (target.page !== undefined) {
+                    anchor.dataset.pdfPage = String(target.page);
+                    anchor.href = this.pageHref(target.page);
+                    if (this.onNavigate) anchor.addEventListener('click', event => {
+                        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                        event.preventDefault();
+                        this.onNavigate(target.page, event);
+                    });
+                } else {
+                    anchor.href = target.url;
+                    anchor.target = '_blank';
+                    anchor.rel = 'noopener noreferrer';
+                }
+                this.linkLayer.appendChild(anchor);
+                this.links.push({anchor, rect: annotation.rect});
+            }
+            this.positionLinks();
+        } catch { /* The source remains readable when annotation metadata is malformed. */ }
+    }
+
+    safeLinkUrl(value) {
+        if (typeof value !== 'string' || !value.trim()) return null;
+        try {
+            const url = new URL(value);
+            return ['http:', 'https:', 'mailto:'].includes(url.protocol) && !url.username && !url.password
+                ? url.href : null;
+        } catch { return null; }
+    }
+
+    pageHref(page) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('page', String(page));
+        url.searchParams.delete('ch');
+        url.searchParams.delete('local');
+        url.hash = '';
+        return url.href;
+    }
+
+    positionLinks() {
+        if (!this.pageViewport) return;
+        for (const {anchor, rect} of this.links) {
+            const [a, b, c, d, e, f] = this.pageViewport.transform;
+            const corners = [[rect[0], rect[1]], [rect[0], rect[3]], [rect[2], rect[1]], [rect[2], rect[3]]]
+                .map(([x, y]) => ({x: a * x + c * y + e, y: b * x + d * y + f}));
+            const left = Math.min(...corners.map(point => point.x));
+            const top = Math.min(...corners.map(point => point.y));
+            const width = Math.max(...corners.map(point => point.x)) - left;
+            const height = Math.max(...corners.map(point => point.y)) - top;
+            Object.assign(anchor.style, {
+                left: left + 'px', top: top + 'px', width: width + 'px', height: height + 'px'
+            });
+        }
     }
 
     renderVisible() {
