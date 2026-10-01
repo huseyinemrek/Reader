@@ -117,7 +117,9 @@ async function describeBook(book) {
         metadataCache.set(book.id, descriptor);
     }
     const ocrMode = ['auto', 'on', 'off'].includes(book.ocrMode) ? book.ocrMode : 'auto';
-    return { ...descriptor, pdfPath, ocrMode,
+    const hasOcr = (await pdfOcr.hasOcrCache(book.id)) ||
+        Boolean(ocrQueue?.status(book.id).jobs.some(j => ['pending', 'processing', 'completed'].includes(j.status)));
+    return { ...descriptor, pdfPath, ocrMode, hasOcr,
         automaticOcr: ocrMode === 'on' || ocrMode === 'auto' && descriptor.textLayer === 'scanned' };
 }
 async function freshJob(job) {
@@ -484,6 +486,23 @@ app.post('/api/books/:id/pdf/ocr', requireAuth, async (req, res) => {
         return res.json(descriptor);
     } catch (error) { sendError(res, error); }
 });
+
+async function handleClearBookOcr(req, res) {
+    try {
+        const book = ownedBook(req);
+        book.ocrMode = 'off';
+        saveDB();
+        ocrRevisions.set(book.id, (ocrRevisions.get(book.id) || 0) + 1);
+        if (ocrQueue) ocrQueue.deleteBook(book.id);
+        await pdfOcr.clearBookOcrCache(book.id);
+        const { pdfPath, ...descriptor } = await describeBook(book);
+        const queue = ocrQueue ? ocrQueue.status(book.id) : null;
+        return res.json({ ok: true, ...descriptor, ocrMode: 'off', automaticOcr: false, queue });
+    } catch (error) { sendError(res, error); }
+}
+
+app.delete('/api/books/:id/pdf/ocr', requireAuth, handleClearBookOcr);
+app.post('/api/books/:id/pdf/ocr/clear', requireAuth, handleClearBookOcr);
 
 app.get('/api/books/:id/pdf/pages/:page', requireAuth, async (req, res) => {
     try {

@@ -118,6 +118,7 @@ Metin, satır içi matematik, numaralı denklemler ve algoritma satırları ayr�
 - `GET /api/books/:id/pdf` → `{totalPages,sourceVersion,textLayer:'native'|'scanned',ocrMode:'auto'|'on'|'off',automaticOcr}`. `POST /api/books/:id/pdf/ocr` gövdesi `{mode:'auto'|'on'|'off'}` kitap tercihini kaydeder ve güncel tanımı döndürür.
 - `GET /api/books/:id/pdf/pages/:page` seçilebilir `blocks`, kaynak (`native`/`ocr`), `engine`, `device`, `modelRevision`, `elapsedMs`, `pipelineVersion`, `metrics`, `qualityLimits` döndürür. OCR sonuçları kaynak görsel adresini de içerir; yerleşik metin okuması görsel üretmez. `?ocr=0` yalnız yerleşik metni, `?ocr=1` açık yeniden çıkarımı ister. VPS’de dönen `jobId` için `?ocrJob=<id>` aynı nesli izler; iptal edilen/değiştirilen iş 410 döndürür. GLM için `confidence` değeri `null`dır; uydurma doğruluk yüzdesi verilmez.
 - OCR kusursuz değildir: geçerli LaTeX doğru denklem garantisi vermez. Küçük semboller, grafik etiketleri ve karmaşık düzen için orijinal sayfa esas alınmalıdır. GLM'nin model kartı Türkçe için ayrı doğruluk garantisi sunmaz.
+- `DELETE /api/books/:id/pdf/ocr` devam eden OCR işlemlerini iptal eder, kitabın OCR önbelleğini siler, `ocrMode`'u `off` yapar ve yerleşik metin önbelleğini koruyarak sayfaları temiz kaynak metnine döndürür. Arayüzde OCR başladığında veya önbellek varken **OCR’yi İptal Et ve Önbelleği Sil** seçeneği sunulur.
 
 Ortak OCR motoru `local/`, `vps/` ve isteğe bağlı `compute/` tarafından kullanılır; Firebase `hosting/` sürümünde yalnız yerleşik PDF metni ve kaynak görüntü vardır, OCR çalışmaz.
 

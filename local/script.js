@@ -285,6 +285,85 @@ document.addEventListener('DOMContentLoaded', async () => {
     const computeTo = document.getElementById('compute-to');
     const computeSubmit = document.getElementById('compute-submit');
     const computeStatus = document.getElementById('compute-status');
+    const pdfOcrCancel = document.getElementById('pdf-ocr-cancel');
+    const computeCancel = document.getElementById('compute-cancel');
+    let ocrInProgress = false;
+
+    function updateOcrCancelVisibility(active = null) {
+        if (active !== null) ocrInProgress = Boolean(active);
+        const hasOcr = Boolean(currentPdfMetadata?.hasOcr);
+        const ocrModeOn = currentPdfMetadata?.ocrMode === 'on';
+        const hasVisibleOcr = Array.from(pdfPageStates.keys()).some(section => section.dataset.textSource === 'ocr');
+        const show = currentBookType === 'pdf' && (ocrInProgress || hasOcr || ocrModeOn || hasVisibleOcr);
+        if (pdfOcrCancel) pdfOcrCancel.style.display = show ? 'block' : 'none';
+        if (computeCancel) computeCancel.style.display = show ? 'inline-block' : 'none';
+    }
+
+    async function cancelAndClearOcr() {
+        if (currentBookType !== 'pdf' || !currentBookId || ocrPolicyChanging) return;
+        const token = session;
+        const bookId = currentBookId;
+        ocrPolicyChanging = true;
+        ocrInProgress = false;
+        if (pdfOcrCancel) {
+            pdfOcrCancel.disabled = true;
+            pdfOcrCancel.textContent = 'OCR iptal ediliyor…';
+        }
+        if (computeCancel) {
+            computeCancel.disabled = true;
+            computeCancel.textContent = 'OCR iptal ediliyor…';
+        }
+        pdfOcrMode.disabled = pdfOcrCurrent.disabled = computeSubmit.disabled = true;
+        computeTrackAbort?.abort();
+        stopTTS();
+        for (const [section, state] of pdfPageStates) {
+            state.abort?.abort();
+            const text = section.querySelector('.pdf-page-text');
+            text.style.minHeight = text.getBoundingClientRect().height + 'px';
+            text.replaceChildren();
+            delete section.dataset.textSource;
+            state.ocrPage = null;
+            pdfLayoutView.sync(section, state);
+            section.querySelector('[data-pdf-ocr]')?.setAttribute('disabled', 'true');
+            const status = section.querySelector('.pdf-text-status');
+            if (status) status.textContent = 'OCR iptal ediliyor ve önbellek siliniyor…';
+        }
+        try {
+            const response = await authFetch('/api/books/' + encodeURIComponent(bookId) + '/pdf/ocr', {
+                method: 'DELETE', signal: sessionAbort.signal
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || 'OCR iptal edilemedi.');
+            sessionAbort.signal.throwIfAborted();
+            if (token !== session) return;
+            showPdfMetadata(result);
+            if (result.queue) showComputeStatus(result.queue);
+            computeStatus.textContent = 'OCR işleri iptal edildi ve önbellek silindi. Sayfalar PDF’nin kendi metnine döndürüldü.';
+            updateCurrentPageOcrControls({
+                state: '',
+                text: `Sayfa ${currentPdfPage}: OCR iptal edildi ve önbellek silindi.`
+            });
+            updateOcrCancelVisibility(false);
+        } catch (error) {
+            if (token !== session || sessionAbort.signal.aborted) return;
+            computeStatus.textContent = 'İptal hatası: ' + error.message;
+            if (pdfOcrDescription) pdfOcrDescription.textContent += ' İptal hatası: ' + error.message;
+        } finally {
+            if (token === session) {
+                ocrPolicyChanging = false;
+                pdfOcrMode.disabled = pdfOcrCurrent.disabled = computeSubmit.disabled = false;
+                if (pdfOcrCancel) {
+                    pdfOcrCancel.disabled = false;
+                    pdfOcrCancel.textContent = 'OCR’yi İptal Et ve Önbelleği Sil';
+                }
+                if (computeCancel) {
+                    computeCancel.disabled = false;
+                    computeCancel.textContent = 'OCR’yi İptal Et ve Önbelleği Sil';
+                }
+                for (const section of pdfPageStates.keys()) void hydratePdfPage(section);
+            }
+        }
+    }
 
     function showPdfMetadata(metadata) {
         currentPdfMetadata = metadata;
@@ -296,6 +375,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ? 'Ziyaret edilen sayfalarda OCR açık.'
             : 'Otomatik OCR kapalı; yalnız PDF’nin kendi metni gösterilir.');
         updateCurrentPageOcrControls();
+        updateOcrCancelVisibility();
     }
 
     function updateCurrentPageOcrControls(state = null) {
@@ -303,6 +383,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         pdfOcrCurrent.textContent = `Geçerli sayfayı (Sayfa ${currentPdfPage}) OCR yap / yeniden üret`;
         if (!pdfOcrCurrentStatus) return;
         if (state) {
+            if (['loading', 'processing', 'pending'].includes(state.state)) updateOcrCancelVisibility(true);
             pdfOcrCurrentStatus.dataset.state = state.state || '';
             pdfOcrCurrentStatus.textContent = state.text || '';
             if (state.title) pdfOcrCurrentStatus.title = state.title;
@@ -375,11 +456,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (section) {
             stopTTS();
             void hydratePdfPage(section, true);
+            updateOcrCancelVisibility(true);
         }
     });
+    pdfOcrCancel?.addEventListener('click', cancelAndClearOcr);
+    computeCancel?.addEventListener('click', cancelAndClearOcr);
 
     function showComputeStatus(info) {
         const counts = info.counts;
+        if (counts.pending > 0 || counts.processing > 0 || counts.completed > 0) updateOcrCancelVisibility(true);
         computeStatus.textContent = `${counts.completed} / ${info.totalPages} sayfa hazır · ` +
             `${counts.pending} bekliyor · ${counts.processing} işleniyor · ${counts.failed} hata. ` +
             (info.mode === 'compute'
@@ -452,6 +537,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (token !== session) return;
             showPdfMetadata(info);
             showComputeStatus(info);
+            updateOcrCancelVisibility(true);
             for (const section of pdfPageStates.keys()) {
                 const page = Number(section.dataset.pageIndex);
                 if ((body.fromPage && page < body.fromPage) || (body.toPage && page > body.toPage)) continue;
@@ -834,6 +920,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         pdfReadingAnchor = null;
         computeSubmit.disabled = false;
         computeStatus.textContent = '';
+        ocrInProgress = false;
+        updateOcrCancelVisibility(false);
         if (currentPdfLoadingTask) currentPdfLoadingTask.destroy().catch(error => console.error('PDF kapatılamadı:', error));
         currentPdfLoadingTask = null;
         currentPdfDoc = null;
@@ -1880,6 +1968,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const pollText = (result.status === 'processing' ? 'OCR işleniyor' : 'OCR kuyrukta bekliyor') +
                     (result.mode === 'compute' ? ' · Evde GPU worker’ını başlatın.' : ' · VPS arka planda çalışıyor.') +
                     ' Kaynak PDF kullanılabilir; metin hazır olduğunda otomatik görünür.';
+                updateOcrCancelVisibility(true);
                 if (status) {
                     status.dataset.state = pollState;
                     status.textContent = pollText;
@@ -1915,6 +2004,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             text.setAttribute('aria-label', result.source === 'ocr' ? 'OCR ile tanınan metin' : 'PDF’nin kendi metin katmanı');
             section.dataset.textSource = result.source;
             state.ocrPage = result.source === 'ocr' ? result : null;
+            if (result.source === 'ocr') updateOcrCancelVisibility(true);
             pdfLayoutView.sync(section, state);
             const stateKind = qualityLimits.length ? 'warning' : 'ready';
             const metadata = [result.engine, result.device,

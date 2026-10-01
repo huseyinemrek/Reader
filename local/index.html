@@ -177,6 +177,7 @@
                 <small>Bu seçim kitapla birlikte kaydedilir. Kapalıyken bile aşağıdaki düğmeyle yalnız geçerli sayfayı OCR yapabilirsiniz. Yerel kullanımda “Açık”, kitabın ziyaret ettiğiniz sayfalarını yerel motorla işler.</small>
                 <button id="pdf-ocr-current" class="mode-btn" type="button">Geçerli sayfayı OCR yap / yeniden üret</button>
                 <small id="pdf-ocr-current-status" class="pdf-text-status" role="status"></small>
+                <button id="pdf-ocr-cancel" class="mode-btn danger-btn" type="button" style="display: none; margin-top: 8px;">OCR’yi İptal Et ve Önbelleği Sil</button>
             </div>
             <details id="compute-panel" class="compute-panel" hidden>
                 <summary>OCR işleme ve dışarı çıkmadan kitap hazırlama</summary>
@@ -200,6 +201,7 @@
                         <label for="compute-to">Son sayfa <input id="compute-to" type="number" min="1" value="1"></label>
                     </div>
                     <button id="compute-submit" class="mode-btn" type="submit">OCR hazırlamayı başlat</button>
+                    <button id="compute-cancel" class="mode-btn danger-btn" type="button" style="display: none;">OCR’yi İptal Et ve Önbelleği Sil</button>
                 </form>
                 <p id="compute-status" role="status" aria-live="polite"></p>
             </details>

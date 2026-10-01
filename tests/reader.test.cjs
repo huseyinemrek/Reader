@@ -887,6 +887,38 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await page.click('#settings-close');
         });
 
+        if (mode !== 'hosting') {
+            await t.test('starting OCR exposes the cancel button and cancelling clears queue and cache', async () => {
+                await openPdf(page, base);
+                await openSidebar(page, 'settings');
+                try {
+                    const cancelBtn = '#pdf-ocr-cancel';
+                    assert.equal(await page.$eval(cancelBtn, el => getComputedStyle(el).display), 'none');
+                    if (mode === 'vps') {
+                        await page.$eval('#compute-panel', el => { el.open = true; });
+                        await page.click('#compute-submit');
+                        await page.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).display !== 'none',
+                            { timeout: 5000 }, '#compute-cancel');
+                        assert.notEqual(await page.$eval('#compute-cancel', el => getComputedStyle(el).display), 'none');
+                        await page.click('#compute-cancel');
+                        await page.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).display === 'none',
+                            { timeout: 10000 }, '#compute-cancel');
+                        assert.match(await page.$eval('#compute-status', el => el.textContent), /iptal edildi ve önbellek silindi/);
+                    } else {
+                        await page.click('#pdf-ocr-current');
+                        await page.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).display !== 'none',
+                            { timeout: 5000 }, cancelBtn);
+                        await page.click(cancelBtn);
+                        await page.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).display === 'none',
+                            { timeout: 10000 }, cancelBtn);
+                    }
+                    assert.equal(await page.$eval('#pdf-ocr-mode', el => el.value), 'off');
+                } finally {
+                    await page.click('#settings-close');
+                }
+            });
+        }
+
         await t.test('real background uploads accept a second file while reading without route or position resets', async () => {
             await page.setViewport({ width: 1400, height: 960 });
             await openPdf(page, base);

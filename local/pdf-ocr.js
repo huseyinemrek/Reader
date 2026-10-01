@@ -633,6 +633,46 @@ function createPdfOcr(uploadsDirectory) {
     function cancelBookOcr(bookId) {
         bookGenerations.set(bookId, (bookGenerations.get(bookId) || 0) + 1);
     }
+    async function hasOcrCache(bookId) {
+        if (typeof bookId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(bookId)) return false;
+        try {
+            const cacheDirectory = path.join(pdfCacheRoot, bookId);
+            const entries = await fs.promises.readdir(cacheDirectory);
+            return entries.some(name => name.startsWith('page-') && !name.includes('-native') && name.endsWith('.json'));
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function clearBookOcrCache(bookId) {
+        if (typeof bookId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(bookId)) {
+            return Promise.reject(makeError(400, 'Invalid book identifier.'));
+        }
+        cancelBookOcr(bookId);
+        const cacheDirectory = path.join(pdfCacheRoot, bookId);
+        const pagePrefix = `${bookId}:`;
+        const pendingOcr = [];
+        for (const [key, entry] of inFlightPages) {
+            if (key.startsWith(pagePrefix)) pendingOcr.push(entry.promise);
+        }
+        return Promise.allSettled(pendingOcr).then(() => enqueue(async () => {
+            let entries;
+            try {
+                entries = await fs.promises.readdir(cacheDirectory, { withFileTypes: true });
+            } catch (error) {
+                if (error.code === 'ENOENT') return;
+                throw error;
+            }
+            const deletions = [];
+            for (const entry of entries) {
+                const name = entry.name;
+                if (name === 'descriptor.json' || name.includes('-native')) continue;
+                deletions.push(fs.promises.rm(path.join(cacheDirectory, name), { recursive: true, force: true }));
+            }
+            await Promise.all(deletions);
+        }));
+    }
+
 
     function deleteBookCache(bookId, { waitForJobs = true } = {}) {
         if (typeof bookId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(bookId)) {
@@ -665,7 +705,7 @@ function createPdfOcr(uploadsDirectory) {
         await jobQueue;
     }
 
-    return { getPdfPage, getCachedPage, getSource, describePdf, saveComputedPage, cancelBookOcr, deleteBookCache, shutdown, pipelineVersion: CACHE_VERSION };
+    return { getPdfPage, getCachedPage, getSource, describePdf, saveComputedPage, cancelBookOcr, hasOcrCache, clearBookOcrCache, deleteBookCache, shutdown, pipelineVersion: CACHE_VERSION };
 }
 
 module.exports = createPdfOcr;

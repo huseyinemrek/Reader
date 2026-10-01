@@ -530,6 +530,18 @@ body:has(#reader-view.paged-mode)::-webkit-scrollbar,
     box-shadow: 0 4px 15px rgba(92, 107, 192, 0.4);
 }
 
+.mode-btn.danger-btn {
+    background: rgba(229, 57, 53, 0.18);
+    border-color: rgba(229, 57, 53, 0.45);
+    color: #ff8a80;
+}
+
+.mode-btn.danger-btn:hover {
+    background: #e53935;
+    border-color: #d32f2f;
+    color: #ffffff;
+}
+
 /* --- AYARLAR YAN MENÜSÜ --- */
 
 /* Cam efekti sınıfı */

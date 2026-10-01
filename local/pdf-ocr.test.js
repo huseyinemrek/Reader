@@ -204,6 +204,38 @@ test('native illustration cache stays independent of OCR output and invalidates 
     assert.equal(fs.existsSync(path.join(uploads, 'pdf', source.bookId)), false);
 });
 
+test('clearBookOcrCache removes OCR cache files while preserving native cache and descriptor', async t => {
+    const { uploads, add, cleanup } = fixture(t);
+    const source = add('clear_ocr_cache', [`${textStream(body)}\n${colorImageStream}`]);
+    const service = createPdfOcr(uploads);
+    cleanup.push(() => service.shutdown());
+    const descriptor = await service.describePdf(source);
+    const geometry = await service.describePdf({ ...source, page: 1 });
+    const native = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
+    assert.equal(native.source, 'native');
+    assert.equal(await service.hasOcrCache(source.bookId), false);
+
+    await service.saveComputedPage({
+        ...source, page: 1, ...workerPage(geometry.width, geometry.height, 'OCR text result'),
+        expectedSourceVersion: geometry.sourceVersion, isCurrent: () => true
+    });
+    assert.equal(await service.hasOcrCache(source.bookId), true);
+    assert.ok(await service.getCachedPage({ ...source, page: 1 }));
+
+    await service.clearBookOcrCache(source.bookId);
+    assert.equal(await service.hasOcrCache(source.bookId), false);
+    assert.equal(await service.getCachedPage({ ...source, page: 1 }), null);
+
+    const bookDir = path.join(uploads, 'pdf', source.bookId);
+    assert.ok(fs.existsSync(path.join(bookDir, 'descriptor.json')));
+    const files = fs.readdirSync(bookDir);
+    assert.ok(files.some(f => f.includes('-native')));
+    assert.equal(files.some(f => f.startsWith('page-') && !f.includes('-native')), false);
+
+    const nativeAfter = await service.getPdfPage({ ...source, page: 1, nativeOnly: true });
+    assert.deepEqual(nativeAfter.blocks, native.blocks);
+});
+
 test('classification finds prose after long blank/image front matter, recognizes short prose and rejects graph glyphs', async t => {
     const { uploads, add, cleanup } = fixture(t);
     const service = createPdfOcr(uploads);
@@ -461,6 +493,13 @@ test('book preferences, explicit generations and cancellation control what reade
     assert.equal(batch.body.automaticOcr, true);
     assert.equal((await request(`${route(native.bookId)}/pdf`)).body.ocrMode, 'on');
     await request(`${route(native.bookId)}/pdf/ocr`, { method: 'POST', body: { mode: 'off' } });
+    const cleared = await request(`${route(native.bookId)}/pdf/ocr`, { method: 'DELETE' });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.ocrMode, 'off');
+    assert.equal(cleared.body.automaticOcr, false);
+    assert.equal((await request(`${route(native.bookId)}/pdf`)).body.hasOcr, false);
+    assert.deepEqual((await request(`${route(native.bookId)}/compute`)).body.counts,
+        { pending: 0, processing: 0, completed: 0, failed: 0 });
     await stop();
     const reopened = await startServer(directory, cleanup);
     assert.equal((await reopened.request(`${route(native.bookId)}/pdf`)).body.ocrMode, 'off');
