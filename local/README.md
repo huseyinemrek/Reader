@@ -74,6 +74,12 @@ Okuyucunun üst menüsünü açıp `+` ile kitap seçin. Seçili dosyalar sıray
 
 Hatalı iş sonraki kitabı durdurmaz; daire üzerinden yeniden deneme/listeden kaldırma kullanılabilir. Bekleyen veya çalışan iş varsa sekme kapatma/yenilemede tarayıcı uyarısı açılır; uyarı geçilip sekme kapanırsa kuyruk geri getirilmez. Tamamlanmış kitaplar diskte kalır. Oturum değiştirme/çıkış eski hesabın bekleyen işlerini iptal eder. Local aynı makinedeki OCR motorunu kullanır; VPS/ev worker hazırlama paneli local arayüzünde gösterilmez.
 
+### Kitap içi linklerden geri dönüş
+
+PDF’nin metnindeki/kaynak görüntüsündeki linkler, içindekiler ve EPUB/HTMLZ kitap içi bağlantıları için ayrıldığınız okuma konumu saklanır. Sağ alttaki düğmelerin üstünde **Okuduğun yere dön · Sayfa N** beş saniye görünür; süre dolunca düğmenin tamamı gizlenir. Dönüş, **Ayarlar → Link öncesi konuma dön** üzerinden erişilebilir kalır. Art arda linkler ters sırayla geri alınır; normal sayfa çevirme dönüş geçmişini silmez. Metin konumu güncel ekran/font düzeninde geri bulunur; kaydırmalı okumada sayfa içi konum korunur.
+
+Geçmiş açık kitap oturumuna aittir; kütüphaneye dönüş, kitap/hesap değişimi veya sekme yenileme geçmişi temizler. Aynı ortak modül Local, VPS ve Hosting’de kullanılır.
+
 ## PDF ve OCR
 
 PDF dosyasını **Yeni Kitap Ekle** ile yükleyin. Orijinal sayfa tarayıcıda PDF.js ile doğrudan PDF kaynağından çizilir; OCR sonucunu beklemez. Yakınlaştırma düğmeleriyle %500'e kadar büyütebilir, sayfaya sığdırabilir ve görüntüyü kaydırabilirsiniz. Görünen alan cihaz piksel oranında yeniden çizilir; her çizim parçası en fazla 1024 × 1024 fiziksel pikseldir. Kaynak PDF taranmış bir fotoğrafsa renderer kaybolmuş ayrıntıları geri getiremez.

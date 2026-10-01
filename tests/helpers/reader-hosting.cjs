@@ -163,7 +163,7 @@ export { app,auth,db,storage };`;
     });
 }
 
-async function seedHosting(page, runtime, epub, pdfGraphics) {
+async function seedHosting(page, runtime, epub, pdfGraphics, html) {
     await page.goto(runtime.base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof JSZip === 'function');
     const fixtures = [];
@@ -173,6 +173,7 @@ async function seedHosting(page, runtime, epub, pdfGraphics) {
     fixtures.push({ id: 'book_test_epub', name: path.basename(epub.file), title: epub.title, bytes: epub.bytes.toString('base64') });
     fixtures.push({ id: 'book_test_pdf_graphics', name: path.basename(pdfGraphics.file),
         title: pdfGraphics.title, bytes: pdfGraphics.bytes.toString('base64') });
+    fixtures.push({ id: 'book_test_html', name: path.basename(html.file), title: html.title, bytes: html.bytes.toString('base64') });
     await page.evaluate(async fixtures => {
         const { auth, db, storage } = await import('/firebase-config.js');
         const { createUserWithEmailAndPassword } = await import('https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js');
@@ -184,9 +185,9 @@ async function seedHosting(page, runtime, epub, pdfGraphics) {
             const bytes = Uint8Array.from(atob(fixture.bytes), char => char.charCodeAt(0));
             const storagePath = `users/${user.uid}/books/${fixture.id}_${fixture.name}`;
             const bookRef = ref(storage, storagePath);
-            await uploadBytes(bookRef, bytes, { contentType: fixture.name.endsWith('.pdf') ? 'application/pdf' : 'application/epub+zip' });
+            await uploadBytes(bookRef, bytes, { contentType: fixture.name.endsWith('.pdf') ? 'application/pdf' : fixture.name.endsWith('.epub') ? 'application/epub+zip' : 'application/zip' });
             let layoutUrl = null, layoutStoragePath = null;
-            if (fixture.name.endsWith('.epub')) {
+            if (/\.(epub|htmlz)$/u.test(fixture.name)) {
                 const zip = await JSZip.loadAsync(bytes);
                 const { blob } = await buildLayoutBundle(zip);
                 layoutStoragePath = `users/${user.uid}/layouts/${fixture.id}.zip`;

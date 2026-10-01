@@ -10,6 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,600;1,400;1,600&family=Lora:ital,wght@0,400;0,600;1,400;1,600&family=Outfit:ital,wght@0,400;0,600;1,400;1,600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/reader-core/pdf-layout.css">
+    <link rel="stylesheet" href="/reader-core/reader-link-history.css">
     <link rel="stylesheet" href="/node_modules/katex/dist/katex.min.css">
     <script src="/node_modules/katex/dist/katex.min.js"></script>
     <!-- JSZip for handling HTMLZ (Zip) files -->
@@ -75,6 +76,7 @@
         </div>
 
         <!-- Floating Action Buttons -->
+        <button type="button" id="link-return-toast" class="link-return-button" hidden><i class="fa-solid fa-arrow-rotate-left" aria-hidden="true"></i><span>Okuduğun yere dön</span></button>
         <button class="icon-btn" id="toc-toggle" title="İçindekiler"><i class="fa-solid fa-list-ul"></i></button>
         <button class="icon-btn" id="tts-toggle" title="Sesli Oku" style="background: linear-gradient(135deg, #FF9800 0%, #FF5722 100%); color: white; box-shadow: 0 4px 15px rgba(255,152,0,0.4);"><i class="fa-solid fa-headphones"></i></button>
         <button class="icon-btn" id="settings-toggle" title="Ayarlar" style="background: var(--ui-primary); color: white; box-shadow: 0 4px 15px rgba(33,150,243,0.4);"><i class="fa-solid fa-gear"></i></button>
@@ -126,6 +128,9 @@
         </div>
         
         <div class="settings-content">
+            <div id="link-return-setting" hidden>
+                <button type="button" id="link-return-settings" class="link-return-button"><i class="fa-solid fa-arrow-rotate-left" aria-hidden="true"></i><span>Link öncesi konuma dön</span></button>
+            </div>
             <!-- Theme Presets -->
             <div class="setting-group">
                 <label>Hazır Temalar</label>

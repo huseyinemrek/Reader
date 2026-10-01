@@ -34,7 +34,7 @@ async function makeEpub(directory, title = 'Generated parity journey') {
     zip.file('OEBPS/package.opf', `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" unique-identifier="id" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">generated-reader-regression</dc:identifier><dc:title>${title}</dc:title><dc:language>en</dc:language></metadata><manifest><item id="first" href="first.xhtml" media-type="application/xhtml+xml"/><item id="later" href="later.xhtml" media-type="application/xhtml+xml"/><item id="css" href="journey.css" media-type="text/css"/><item id="red" href="images/first.png" media-type="image/png"/><item id="blue" href="images/later.png" media-type="image/png"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="first"/><itemref idref="later"/></spine></package>`);
     zip.file('OEBPS/nav.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="first.xhtml">First journey</a></li><li><a href="later.xhtml">Later journey</a></li></ol></nav></body></html>');
     zip.file('OEBPS/journey.css', 'body { font-family: Georgia, serif; color: #593219; } p {font-size: 14px;} .large {font-size: 21px;} .small {font-size: 10px;} em {font-style: italic;} strong {font-weight:700;} img {width:160px;height:160px;} .css-illustration {width:32px;height:32px;background-size:100% 100%;} .css-First {background-image:url(images/first.png);} .css-Later {background-image:url(images/later.png);}');
-    const paragraphs = chapter => Array.from({ length: 55 }, (_, i) => `<p id="${chapter}-${i}">${chapter} passage ${String(i).padStart(2, '0')}. The quiet traveller reads the river, remembers the turning road, and carries a lantern through the evening. A patient companion follows the path beyond the hill, watching the sky while the village slowly fades behind them.</p>`).join('');
+    const paragraphs = chapter => Array.from({ length: 55 }, (_, i) => `<p id="${chapter}-${i}">${chapter} passage ${String(i).padStart(2, '0')}. The quiet traveller reads the river, remembers the turning road, and carries a lantern through the evening. A patient companion follows the path beyond the hill, watching the sky while the village slowly fades behind them.${i === 20 ? chapter === 'First' ? ' <a class="excursion-link" href="later.xhtml#Later-20">Visit appendix</a>' : ' <a class="excursion-link" href="first.xhtml#First-40">Visit note</a>' : ''}</p>`).join('');
     const chapter = (name, image) => `<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${name} journey</title><link rel="stylesheet" href="journey.css"/></head><body><div class="css-illustration css-${name}"></div><img alt="${name} illustration" src="images/${image}.png"/><h1>${name} journey</h1><p class="source-runs">Plain words <em>gentle emphasis</em> then plain <strong>strong emphasis</strong>.</p><p class="large">Larger source lettering</p><p class="small">Smaller source lettering</p>${paragraphs(name)}</body></html>`;
     zip.file('OEBPS/first.xhtml', chapter('First', 'first'));
     zip.file('OEBPS/later.xhtml', chapter('Later', 'later'));
@@ -111,4 +111,15 @@ async function makePdfGraphics(directory) {
     return { file, title, bytes };
 }
 
-module.exports = { makeEpub, makePdfGraphics };
+async function makeHtmlz(directory) {
+    const title = 'Generated HTML link journey';
+    const zip = new JSZip();
+    const paragraphs = Array.from({ length: 30 }, (_, index) => `<p id="html-${index}">HTML passage ${index}. The reader follows a long road and pauses to inspect a note before returning to the journey.</p>`).join('');
+    zip.file('index.html', `<html><body><p id="html-start"><a href="#html-20">Visit HTML appendix</a></p>${paragraphs}</body></html>`);
+    const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const file = path.join(directory, 'link-journey.htmlz');
+    await fs.writeFile(file, bytes);
+    return { title, file, bytes };
+}
+
+module.exports = { makeEpub, makePdfGraphics, makeHtmlz };

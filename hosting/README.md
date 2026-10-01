@@ -10,6 +10,7 @@ Bu klasör Firebase Hosting, Cloud Firestore ve Cloud Storage altyapısı üzeri
 - **Sayfa Sayfa ve Kaydırma Modları:** CSS Columns tabanlı çift yönlü sayfa çevirme ve akıcı dikey kaydırma modu.
 - **Ortak PDF okuyucu:** Kaynak yer işaretleri ve adlandırılmış/iç içe hedefler, yerleşik font vurgusu/göreli boyutlar, üç metin/PDF düzeni, klavye/fare ayırıcısı ve döşemeli kaynak yakınlaştırma.
 - **Okurken arka plan yükleme:** Üst menüde `+`, çoklu/tekrarlı seçim, kitap adı tooltip’i olan küçük yüzde dairesi; tamamlanma okuyucu sayfasını veya rotasını sıfırlamaz.
+- **Linkten geri dönüş:** Kitap içi PDF/EPUB/HTMLZ ve içindekiler bağlantılarında ayrıldığınız metin konumu saklanır. Sağ alttaki dönüş düğmesi beş saniye sonra tamamen gizlenir; **Ayarlar → Link öncesi konuma dön** açık kitap oturumunda erişilebilir kalır. Art arda linklerden ters sırayla dönülür; normal sayfa çevirme geçmişi silmez. Kitap/hesap değişimi, kütüphaneye dönüş veya sekme yenileme geçmişi temizler.
 - **OCR yok:** Yerleşik PDF metni ve kaynak görüntü kullanılır; taranmış sayfaya metin/font tahmini veya OCR/ev worker arayüzü eklenmez.
 
 ## Hızlı Kurulum

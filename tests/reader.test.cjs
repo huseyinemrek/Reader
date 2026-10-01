@@ -12,7 +12,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
-const { makeEpub, makePdfGraphics } = require('./helpers/reader-fixtures.cjs');
+const { makeEpub, makePdfGraphics, makeHtmlz } = require('./helpers/reader-fixtures.cjs');
 const { startHosting, configureHosting, seedHosting, hostingLibrary } = require('./helpers/reader-hosting.cjs');
 const root = path.resolve(__dirname, '..');
 const requireLocal = createRequire(path.join(root, 'local/package.json'));
@@ -21,12 +21,14 @@ let browser;
 let fixtureDirectory;
 let epubFixture;
 let pdfGraphicsFixture;
+let htmlFixture;
 let uploadFixtures;
 
 before(async () => {
     fixtureDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-generated-fixtures-'));
     epubFixture = await makeEpub(fixtureDirectory);
     pdfGraphicsFixture = await makePdfGraphics(fixtureDirectory);
+    htmlFixture = await makeHtmlz(fixtureDirectory);
     uploadFixtures = await Promise.all([
         makeEpub(fixtureDirectory, 'First background journey'),
         makeEpub(fixtureDirectory, 'Second background journey')
@@ -86,6 +88,10 @@ async function startReader(mode, t) {
     await fs.copyFile(pdfGraphicsFixture.file, path.join(data, 'uploads', graphicsName));
     books.push({ id: 'book_test_pdf_graphics', title: pdfGraphicsFixture.title, fileName: graphicsName,
         userId: 'local_user', bookUrl: '/uploads/' + graphicsName, coverUrl: null, ocrMode: 'off', toc: [] });
+    const htmlName = 'book_test_html_generated.htmlz';
+    await fs.copyFile(htmlFixture.file, path.join(data, 'uploads', htmlName));
+    books.push({ id: 'book_test_html', title: htmlFixture.title, fileName: htmlName,
+        userId: 'local_user', bookUrl: '/uploads/' + htmlName, coverUrl: null, toc: [] });
     await fs.writeFile(path.join(data, 'library.json'), JSON.stringify(books));
     const port = await availablePort();
     const base = `http://127.0.0.1:${port}`;
@@ -314,7 +320,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 }));
             }
         });
-        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture);
+        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture, htmlFixture);
 
         await t.test('mixed faces preserve word-level emphasis and relative sizes', async () => {
             await openPdf(page, base);
@@ -424,6 +430,69 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await page.locator('.pdf-link-layer a[data-pdf-page="3"]').click();
             await page.waitForFunction(() => Number(new URLSearchParams(location.search).get('page')) === 3 &&
                 document.querySelector('#pdf-text-3')?.textContent.includes('page 3.'), { timeout: 10000 });
+        });
+
+        await t.test('link return expires after five seconds and restores PDF text and source positions', async () => {
+            await openPdf(page, base, 'book_test_typography', 1);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-right');
+            await page.click('#settings-close');
+            await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+            await page.$eval('#pdf-text-1 a[data-pdf-page="2"]', link => link.scrollIntoView({ block: 'center' }));
+            const originalTop = await page.$eval('#book-viewport', element => element.scrollTop);
+            await page.click('#pdf-text-1 a[data-pdf-page="2"]');
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            assert.match(await page.$eval('#link-return-toast', button => button.textContent), /Okuduğun yere dön · Sayfa 1/u);
+            const bounds = await page.evaluate(() => {
+                const toast = document.getElementById('link-return-toast').getBoundingClientRect();
+                const settings = document.getElementById('settings-toggle').getBoundingClientRect();
+                return { above: toast.bottom < settings.top, inside: toast.left >= 0 && toast.right <= innerWidth };
+            });
+            assert.deepEqual(bounds, { above: true, inside: true });
+            if (mode === 'local' && process.env.READER_TEST_SCREENSHOT_DIR) {
+                await fs.mkdir(process.env.READER_TEST_SCREENSHOT_DIR, { recursive: true });
+                await page.screenshot({ path: path.join(process.env.READER_TEST_SCREENSHOT_DIR, 'link-return-toast.png') });
+            }
+            await page.click('#link-return-toast');
+            await page.waitForFunction(() => document.querySelector('#pdf-text-1 a[data-pdf-page="2"]') &&
+                document.getElementById('link-return-setting').hidden, { timeout: 10000 });
+            assert.ok(Math.abs(await page.$eval('#book-viewport', element => element.scrollTop) - originalTop) <= 3,
+                'Returning must restore the original text scroll position within the PDF page');
+
+            await page.waitForSelector('.pdf-link-layer a[data-pdf-page="3"]');
+            await page.locator('.pdf-link-layer a[data-pdf-page="3"]').click();
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            const shownAt = Date.now();
+            await page.waitForFunction(() => document.getElementById('link-return-toast').hidden, { timeout: 7000 });
+            assert.ok(Date.now() - shownAt >= 4500, 'The entire floating button remains visible for five seconds');
+            assert.equal(await page.$eval('#link-return-setting', group => group.hidden), false);
+            await openSidebar(page, 'settings');
+            assert.match(await page.$eval('#link-return-settings', button => button.textContent), /Link öncesi konuma dön · Sayfa 1/u);
+            if (mode === 'local' && process.env.READER_TEST_SCREENSHOT_DIR) {
+                await page.screenshot({ path: path.join(process.env.READER_TEST_SCREENSHOT_DIR, 'link-return-settings.png') });
+            }
+            await page.click('#link-return-settings');
+            await page.waitForFunction(() => document.querySelector('#pdf-text-1 a[data-pdf-page="2"]') &&
+                document.getElementById('link-return-setting').hidden, { timeout: 10000 });
+            const books = await waitForLibrary(page, base, mode, books => books.find(book => book.id === 'book_test_typography')?.pageIndex === 1);
+            assert.equal(books.find(book => book.id === 'book_test_typography').readerPosition.globalPage, 1);
+        });
+
+        await t.test('HTMLZ fragment links return to the original reading page', async () => {
+            await page.goto(`${base}/book/book_test_html?page=1`, { waitUntil: 'domcontentloaded' });
+            await waitForPages(page);
+            await page.click('#html-start a');
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            assert.ok(await page.$eval('#paged-page-text', element => Number(element.textContent.match(/Sayfa (\d+)/u)[1])) > 1);
+            await page.click('#link-return-toast');
+            await page.waitForFunction(() => document.getElementById('link-return-setting').hidden &&
+                document.getElementById('paged-page-text').textContent.startsWith('Sayfa 1 /'));
+            const visible = await page.$eval('#html-start a', link => {
+                const rect = link.getBoundingClientRect();
+                const bounds = document.getElementById('book-viewport').getBoundingClientRect();
+                return rect.right > bounds.left && rect.left < bounds.right;
+            });
+            assert.equal(visible, true);
         });
 
         await t.test('PDF without bookmarks never displays stale library contents', async () => {
@@ -592,6 +661,75 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 page.off('request', onRequest);
                 page.off('response', onResponse);
             }
+        });
+
+        await t.test('EPUB link excursions return in order after reflow and preserve a scrolled passage', async () => {
+            await page.goto(`${base}/book/book_test_epub?ch=0&local=0`, { waitUntil: 'domcontentloaded' });
+            await waitForPages(page);
+            const linkPage = await page.$eval('#First-20 .excursion-link', link => {
+                const viewport = document.getElementById('book-viewport');
+                return 1 + Math.floor((link.getBoundingClientRect().left - viewport.getBoundingClientRect().left + viewport.scrollLeft) / viewport.clientWidth);
+            });
+            await jumpTo(page, linkPage);
+            const original = await page.evaluate(visiblePassage);
+            await page.click('#First-20 .excursion-link');
+            await page.waitForSelector('#Later-20 .excursion-link');
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            const appendix = await page.evaluate(visiblePassage);
+            await page.click('#Later-20 .excursion-link');
+            await page.waitForSelector('#First-40');
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            await page.click('#paged-next-btn');
+            await page.waitForFunction(() => !document.getElementById('page-jump-input').disabled);
+            await page.click('#link-return-toast');
+            await page.waitForFunction(() => document.querySelector('#Later-20') && !document.getElementById('link-return-settings').disabled);
+            assert.deepEqual(await page.evaluate(visiblePassage), appendix);
+            assert.equal(await page.$eval('#link-return-toast', button => button.hidden), true);
+            await page.setViewport({ width: 600, height: 960 });
+            await page.waitForFunction(() => document.getElementById('book-viewport').clientWidth < 600);
+            await waitForPages(page);
+            await openSidebar(page, 'settings');
+            await page.click('#link-return-settings');
+            await page.waitForFunction(() => document.querySelector('#First-20') && document.getElementById('link-return-setting').hidden);
+            assert.equal((await page.evaluate(visiblePassage)).chapter, original.chapter);
+            assert.equal(await page.evaluate(({ chapter, index }) => {
+                const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+                const range = document.createRange();
+                range.selectNodeContents(document.getElementById(`${chapter}-${index}`));
+                return Array.from(range.getClientRects()).some(rect => rect.right > viewport.left &&
+                    rect.left < viewport.right && rect.bottom > viewport.top && rect.top < viewport.bottom);
+            }, original), true, 'The original source passage remains visible in the newly sized column');
+
+            await openSidebar(page, 'settings');
+            await page.click('#mode-scroll-btn');
+            await page.click('#settings-close');
+            await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+            await page.$eval('#First-20', paragraph => window.scrollTo({
+                top: paragraph.getBoundingClientRect().top + window.scrollY - 100, behavior: 'instant'
+            }));
+            await page.waitForFunction(() => document.querySelector('#First-20')?.getBoundingClientRect().top <= 101);
+            const originalY = await page.$eval('#First-20', paragraph => paragraph.getBoundingClientRect().top);
+            await page.click('#First-20 .excursion-link');
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            await page.click('#link-return-toast');
+            await page.waitForFunction(() => document.querySelector('#First-20') && document.getElementById('link-return-setting').hidden);
+            assert.ok(Math.abs(await page.$eval('#First-20', paragraph => paragraph.getBoundingClientRect().top) - originalY) <= 3,
+                'Scroll mode returns to the same passage and screen offset');
+            await page.click('#First-20 .excursion-link');
+            await page.waitForSelector('#link-return-toast:not([hidden]):not(:disabled)');
+            await openSidebar(page, 'settings');
+            await page.click('#mode-paged-btn');
+            await page.click('#settings-close');
+            await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden' &&
+                !document.getElementById('page-jump-input').disabled);
+            await page.hover('#reader-nav-hit-area');
+            await page.click('#back-to-library');
+            await page.waitForFunction(() => document.getElementById('reader-view').style.display === 'none');
+            assert.equal(await page.$eval('#link-return-toast', button => button.hidden), true);
+            assert.equal(await page.$eval('#link-return-setting', group => group.hidden), true);
+            await page.setViewport({ width: 1400, height: 960 });
+            await openPdf(page, base);
+            assert.equal(await page.$eval('#link-return-setting', group => group.hidden), true);
         });
 
         await t.test('EPUB resize, font changes and reopening preserve logical position and percentage', async () => {

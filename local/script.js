@@ -4,6 +4,7 @@ import { createUploadQueue, uploadHttp } from '/reader-core/upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from '/reader-core/pdf-outline.js';
 import { createPdfLayoutView, createPdfPage } from '/reader-core/pdf-layout-view.js';
 import { renderNativePdfBlocks } from '/reader-core/pdf-reader.js';
+import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor } from '/reader-core/reader-link-history.js';
 
 // --- Firebase Auth Entegrasyonu (Dinamik ve Sıfır Kod Düzenleme) ---
 let auth = null;
@@ -603,7 +604,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         getDocument: () => currentPdfDoc, getCurrentPage: () => currentPdfPage,
         getStates: () => pdfPageStates,
         captureAnchor: capturePdfReadingAnchor, restoreAnchor: restorePdfReadingAnchor,
-        onNavigate: page => goToPage(page),
+        onNavigate: page => linkHistory.follow(() => goToPage(page)),
         onSettingsChange: () => localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings)),
         onInteraction: ({ type }) => {
             if (['drag-end', 'keyboard', 'zoom'].includes(type)) {
@@ -899,6 +900,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // --- Reader Core ---
 
     function releaseBook() {
+        linkHistory.clear();
         flushProgress();
         clearTimeout(scrollSaveTimeout);
         clearTimeout(layoutTimer);
@@ -1043,6 +1045,58 @@ document.addEventListener('DOMContentLoaded', async () => {
             readerPosition: {chapterIndex: currentChapterIndex, localPage: localPagedIndex,
                 globalPage: currentGlobalPage, scrollRatio, layoutKey, readingMode: currentSettings.readingMode}
         }};
+    }
+
+    const linkHistory = createReaderLinkHistory({
+        toast: document.getElementById('link-return-toast'),
+        settingsButton: document.getElementById('link-return-settings'),
+        settingsGroup: document.getElementById('link-return-setting'),
+        capture: captureLinkPosition, restore: restoreLinkPosition,
+        onReturn: () => closeSidebar(settingsSidebar)
+    });
+
+    function captureLinkPosition() {
+        if (!currentBookId || isNavigatingPage) return null;
+        const paged = currentSettings.readingMode === 'paged';
+        const index = currentBookType === 'pdf' ? currentPdfPage - 1 : currentChapterIndex;
+        const section = paged ? bookContent.querySelector(':scope > section[data-index="' + index + '"]')
+            : [...bookContent.children].find(element => element.getBoundingClientRect().bottom > 100);
+        if (!section) return null;
+        const sectionIndex = Number(section.dataset.index);
+        const count = currentBookType === 'epub' ? epubSpine[sectionIndex].pageCount || 1 : totalBookPages || 1;
+        const ratio = paged ? localPagedIndex / count
+            : Math.max(0, Math.min(0.999999, (80 - section.getBoundingClientRect().top) / Math.max(1, section.offsetHeight)));
+        const localPage = currentBookType === 'pdf' ? sectionIndex : paged ? localPagedIndex : Math.floor(ratio * count);
+        return { bookId: currentBookId, chapterIndex: currentBookType === 'epub' ? sectionIndex : 0,
+            localPage, scrollRatio: ratio, layoutKey, readingMode: currentSettings.readingMode,
+            globalPage: currentBookType === 'epub' ? (epubSpine[sectionIndex].startPage || 1) + localPage : localPage + 1,
+            anchor: captureReaderTextAnchor(section.querySelector('.pdf-page-text') || section, bookViewport, paged) };
+    }
+
+    async function restoreLinkPosition(position) {
+        if (position.bookId !== currentBookId) return false;
+        return navigate(async () => {
+            const count = currentBookType === 'epub' ? epubSpine[position.chapterIndex].pageCount : totalBookPages;
+            const local = currentBookType === 'pdf' || (position.layoutKey === layoutKey && position.readingMode === currentSettings.readingMode)
+                ? position.localPage : Math.min(count - 1, Math.floor(position.scrollRatio * count));
+            await showLocation(position.chapterIndex, local, position.scrollRatio);
+            const index = currentBookType === 'pdf' ? position.localPage : position.chapterIndex;
+            const section = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
+            await pdfPageStates.get(section)?.hydration;
+            if (!section?.isConnected || position.bookId !== currentBookId) return;
+            await settleContent(section);
+            const paged = currentSettings.readingMode === 'paged';
+            const page = restoreReaderTextAnchor(section.querySelector('.pdf-page-text') || section,
+                bookViewport, paged, paged && currentBookType !== 'pdf', position.anchor);
+            if (page !== null) { localPagedIndex = page; updatePagedView(); }
+            else if (!paged && currentBookType !== 'pdf') {
+                const ratio = Math.max(0, Math.min(0.999999, (80 - section.getBoundingClientRect().top) / Math.max(1, section.offsetHeight)));
+                localPagedIndex = Math.floor(ratio * count);
+                updatePagedIndicator();
+            }
+            pdfReadingAnchor = capturePdfReadingAnchor();
+            bookContent.focus({preventScroll: true});
+        });
     }
 
     function flushProgress() {
@@ -1225,13 +1279,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function navigate(action) {
-        if (!currentBookId || isNavigatingPage) return;
+        if (!currentBookId || isNavigatingPage) return false;
         const token = session;
         isNavigatingPage = true;
         updatePagedIndicator();
         try {
             await action();
-            if (token === session) saveCurrentProgress();
+            if (token === session) { saveCurrentProgress(); return true; }
         } catch (error) {
             if (token === session && error.name !== 'AbortError') {
                 console.error(error);
@@ -1244,11 +1298,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 updatePagedIndicator();
             }
         }
+        return false;
     }
 
     async function goToPage(page) {
         if (pdfLayoutView.isDragging || !Number.isSafeInteger(page) || page < 1 || page > totalBookPages) return;
-        await navigate(async () => {
+        return navigate(async () => {
             if (currentBookType === 'epub') {
                 const index = epubSpine.findIndex(ch => page < ch.startPage + ch.pageCount);
                 const local = page - epubSpine[index].startPage;
@@ -1563,7 +1618,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (currentBookType === 'pdf') {
             renderPdfToc(currentPdfOutline, tocList, {
                 bookId: currentBookId,
-                onNavigate: async page => { closeSidebar(tocSidebar); await goToPage(page); }
+                onNavigate: async page => { closeSidebar(tocSidebar); await linkHistory.follow(() => goToPage(page)); }
             });
             if (!tocList.children.length) tocList.textContent = 'PDF’de yer işareti/içindekiler kaydı bulunamadı.';
             return;
@@ -1578,7 +1633,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const index = epubSpine.findIndex(ch => ch.id === target);
                 if (index >= 0) {
                     closeSidebar(tocSidebar);
-                    await navigate(() => showLocation(index));
+                    await linkHistory.follow(() => navigate(() => showLocation(index)));
                 }
             });
             li.appendChild(link); tocList.appendChild(li);
@@ -1790,12 +1845,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         const link = event.target.closest('a');
-        if (!link || currentBookType !== 'epub') return;
+        if (!link || !['epub', 'html'].includes(currentBookType) || event.button !== 0 ||
+            event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         const url = new URL(link.href);
-        const index = epubSpine.findIndex(ch => ch.url.split('#')[0] === url.href.split('#')[0]);
+        const index = currentBookType === 'epub'
+            ? epubSpine.findIndex(ch => ch.url.split('#')[0] === url.href.split('#')[0])
+            : url.hash && (link.getAttribute('href').startsWith('#') || url.href.split('#')[0] === htmlResourceUrl) ? 0 : -1;
         if (index < 0) return;
         event.preventDefault();
-        await navigate(async () => {
+        await linkHistory.follow(() => navigate(async () => {
             await showLocation(index);
             if (url.hash) {
                 const target = document.getElementById(decodeURIComponent(url.hash.slice(1)));
@@ -1804,7 +1862,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     updatePagedView();
                 } else target?.scrollIntoView();
             }
-        });
+        }));
     });
 
     bookContent.addEventListener('keydown', event => {
@@ -1904,7 +1962,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function mountPdfPage(section) {
         pdfPageStates.set(section, {viewer: null, abort: null});
         pdfLayoutView.apply();
-        void hydratePdfPage(section);
+        pdfPageStates.get(section).hydration = hydratePdfPage(section);
     }
 
     async function hydratePdfPage(section, forceOcr = false, explicitJob = null) {
@@ -2068,7 +2126,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function makePdfPageText(result, assetToken) {
         const text = result.source === 'native'
             ? renderNativePdfBlocks(result.blocks, document, {
-                onNavigate: page => goToPage(page),
+                onNavigate: page => linkHistory.follow(() => goToPage(page)),
                 assetUrl: url => authenticatedAsset(url, assetToken)
             }) : document.createElement('div');
         if (result.source !== 'native') for (const block of result.blocks) {
