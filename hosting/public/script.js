@@ -1513,6 +1513,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const page = await currentPdfDoc.getPage(pageNumber);
         const blocks = await getNativePdfBlocks(page, currentPdfDoc, pdfjsLib);
         const section = createPdfPage(pageNumber);
+        section.dataset.textSource = 'native';
         const text = section.querySelector('.pdf-page-text');
         const native = renderNativePdfBlocks(blocks, document, {onNavigate: page => goToPage(page)});
         while (native.firstChild) text.appendChild(native.firstChild);

@@ -691,24 +691,15 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 const geometry = await page.evaluate(() => {
                     const text = document.querySelector('.pdf-page-text').getBoundingClientRect();
                     const image = document.querySelector('.pdf-page-image-column').getBoundingClientRect();
-                    const canvas = Array.from(document.querySelectorAll('.pdf-original-surface canvas'))
-                        .find(c => {
-                            if (!c.width || !c.height) return false;
-                            const pixels = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-                            let light = false, dark = false;
-                            for (let i = 0; i < pixels.length; i += 4) {
-                                if (pixels[i] > 240 && pixels[i + 1] > 240 && pixels[i + 2] > 240) light = true;
-                                if (pixels[i] < 100 && pixels[i + 1] < 100 && pixels[i + 2] < 100 && pixels[i + 3] > 0) dark = true;
-                                if (light && dark) return true;
-                            }
-                            return false;
-                        }) || document.querySelector('.pdf-original-surface canvas');
-                    const ctx = canvas.getContext('2d');
-                    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
                     let light = false, dark = false;
-                    for (let i = 0; i < pixels.length; i += 4) {
-                        if (pixels[i] > 240 && pixels[i + 1] > 240 && pixels[i + 2] > 240) light = true;
-                        if (pixels[i] < 100 && pixels[i + 1] < 100 && pixels[i + 2] < 100 && pixels[i + 3] > 0) dark = true;
+                    for (const canvas of document.querySelectorAll('.pdf-original-surface canvas')) {
+                        if (!canvas.width || !canvas.height) continue;
+                        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+                        for (let i = 0; i < pixels.length; i += 4) {
+                            if (pixels[i] > 240 && pixels[i + 1] > 240 && pixels[i + 2] > 240) light = true;
+                            if (pixels[i] < 100 && pixels[i + 1] < 100 && pixels[i + 2] < 100 && pixels[i + 3] > 0) dark = true;
+                            if (light && dark) break;
+                        }
                         if (light && dark) break;
                     }
                     return { textLeft: text.left, imageLeft: image.left, textWidth: text.width, imageWidth: image.width, light, dark };

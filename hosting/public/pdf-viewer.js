@@ -1,7 +1,7 @@
 // Render only visible tiles at the current zoom and device pixel ratio. The page
 // surface can grow to 500% without allocating a page-sized high-resolution canvas.
 window.PdfPageViewer = class PdfPageViewer {
-    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate} = {}) {
+    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate, textSource = null} = {}) {
         this.column = column;
         this.zoom = zoom;
         this.onZoom = onZoom;
@@ -13,27 +13,6 @@ window.PdfPageViewer = class PdfPageViewer {
         this.generation = 0;
         this.frame = 0;
         this.ratio = window.devicePixelRatio || 1;
-        this.controls = document.createElement('div');
-        this.controls.className = 'pdf-zoom-controls';
-        this.controls.setAttribute('aria-label', 'Orijinal PDF yakınlaştırma');
-        const button = (action, label, title) => {
-            const element = document.createElement('button');
-            element.type = 'button';
-            element.className = 'mode-btn';
-            element.dataset.pdfZoom = action;
-            element.textContent = label;
-            element.setAttribute('aria-label', title);
-            element.addEventListener('click', () => this.setZoom(action));
-            this.controls.appendChild(element);
-            return element;
-        };
-        this.minus = button('out', '−', 'PDF uzaklaştır');
-        this.output = document.createElement('output');
-        this.output.className = 'pdf-zoom-status';
-        this.output.setAttribute('aria-live', 'polite');
-        this.controls.appendChild(this.output);
-        this.plus = button('in', '+', 'PDF yakınlaştır');
-        button('fit', 'Sayfaya sığdır', 'PDF sayfasının tamamını sığdır');
         this.viewport = document.createElement('div');
         this.viewport.className = 'pdf-original-viewport';
         this.viewport.tabIndex = 0;
@@ -46,11 +25,55 @@ window.PdfPageViewer = class PdfPageViewer {
         this.linkLayer.setAttribute('aria-label', 'PDF bağlantıları');
         this.surface.appendChild(this.linkLayer);
         this.viewport.appendChild(this.surface);
+
+        this.footer = document.createElement('div');
+        this.footer.className = 'pdf-image-footer';
+        this.footer.setAttribute('aria-hidden', 'true');
+        this.footer.setAttribute('data-tts-ignore', 'true');
+
+        this.sourceBadge = document.createElement('span');
+        this.sourceBadge.className = 'pdf-source-badge';
+        this.sourceBadge.setAttribute('aria-hidden', 'true');
+        this.sourceBadge.setAttribute('data-tts-ignore', 'true');
+        this.setSource(textSource);
+        this.footer.appendChild(this.sourceBadge);
+
+        this.controls = document.createElement('div');
+        this.controls.className = 'pdf-zoom-controls';
+        this.controls.setAttribute('aria-hidden', 'true');
+        this.controls.setAttribute('data-tts-ignore', 'true');
+        const button = (action, label, title) => {
+            const element = document.createElement('button');
+            element.type = 'button';
+            element.className = 'mode-btn pdf-zoom-btn';
+            element.dataset.pdfZoom = action;
+            element.textContent = label;
+            element.setAttribute('aria-label', title);
+            element.setAttribute('title', title);
+            element.setAttribute('aria-hidden', 'true');
+            element.setAttribute('data-tts-ignore', 'true');
+            element.tabIndex = -1;
+            element.addEventListener('click', () => this.setZoom(action));
+            this.controls.appendChild(element);
+            return element;
+        };
+        this.minus = button('out', '−', 'PDF uzaklaştır (Ctrl -)');
+        this.output = document.createElement('output');
+        this.output.className = 'pdf-zoom-status';
+        this.output.setAttribute('aria-hidden', 'true');
+        this.output.setAttribute('data-tts-ignore', 'true');
+        this.controls.appendChild(this.output);
+        this.plus = button('in', '+', 'PDF yakınlaştır (Ctrl +)');
+        button('fit', 'Sığdır', 'PDF sayfasının tamamını sığdır (Ctrl 0)');
+        this.footer.appendChild(this.controls);
+
         this.status = document.createElement('div');
         this.status.className = 'pdf-render-status';
         this.status.setAttribute('role', 'status');
+        this.status.setAttribute('aria-hidden', 'true');
+        this.status.setAttribute('data-tts-ignore', 'true');
         this.status.textContent = 'Orijinal PDF hazırlanıyor…';
-        column.replaceChildren(this.controls, this.viewport, this.status);
+        column.replaceChildren(this.viewport, this.footer, this.status);
         this.schedule = () => {
             if (!this.frame && !this.destroyed) this.frame = requestAnimationFrame(() => {
                 this.frame = 0;
@@ -63,6 +86,59 @@ window.PdfPageViewer = class PdfPageViewer {
         window.addEventListener('resize', this.schedule);
         this.resizeObserver = new ResizeObserver(this.schedule);
         this.resizeObserver.observe(this.viewport);
+        this.viewport.addEventListener('keydown', event => {
+            if (event.ctrlKey || event.metaKey) {
+                if (event.key === '+' || event.key === '=' || event.key === 'Add') {
+                    event.preventDefault();
+                    this.setZoom('in');
+                } else if (event.key === '-' || event.key === '_' || event.key === 'Subtract') {
+                    event.preventDefault();
+                    this.setZoom('out');
+                } else if (event.key === '0') {
+                    event.preventDefault();
+                    this.setZoom('fit');
+                }
+            } else if (event.key === '+' || event.key === '=') {
+                event.preventDefault();
+                this.setZoom('in');
+            } else if (event.key === '-' || event.key === '_') {
+                event.preventDefault();
+                this.setZoom('out');
+            }
+        });
+        this.viewport.addEventListener('wheel', event => {
+            if (event.ctrlKey || event.metaKey) {
+                event.preventDefault();
+                this.setZoom(event.deltaY < 0 ? 'in' : 'out');
+            }
+        }, { passive: false });
+        let pinchDist = 0;
+        let pinchScale = 1;
+        this.viewport.addEventListener('touchstart', event => {
+            if (event.touches.length === 2) {
+                const [t1, t2] = event.touches;
+                pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+                pinchScale = this.scale || 1;
+            }
+        }, { passive: true });
+        this.viewport.addEventListener('touchmove', event => {
+            if (event.touches.length === 2 && pinchDist > 0) {
+                event.preventDefault();
+                const [t1, t2] = event.touches;
+                const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+                const factor = dist / pinchDist;
+                const target = Math.min(5, Math.max(0.25, Math.round(pinchScale * factor * 20) / 20));
+                if (Math.abs(target - this.scale) >= 0.05) {
+                    this.zoom = target;
+                    this.onZoom?.(target);
+                    this.layout();
+                    this.schedule();
+                }
+            }
+        }, { passive: false });
+        this.viewport.addEventListener('touchend', event => {
+            if (event.touches.length < 2) pinchDist = 0;
+        }, { passive: true });
         pdfDocument.getPage(pageNumber).then(page => {
             if (this.destroyed) return;
             this.page = page;
@@ -72,6 +148,15 @@ window.PdfPageViewer = class PdfPageViewer {
         }).catch(error => {
             if (!this.destroyed) this.showError(error);
         });
+    }
+
+    setSource(source) {
+        if (!this.sourceBadge) return;
+        const text = source === 'ocr' ? 'OCR ile üretildi'
+            : source === 'native' ? 'PDF’nin kendi metin katmanı'
+            : 'Orijinal PDF';
+        this.sourceBadge.textContent = text;
+        this.sourceBadge.dataset.source = source || '';
     }
 
     setZoom(action) {

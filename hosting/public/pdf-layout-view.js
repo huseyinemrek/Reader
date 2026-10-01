@@ -82,10 +82,14 @@ export function createPdfLayoutView({
                 zoom, onZoom: value => {
                     zoom = value;
                     notify('zoom');
-                }, onNavigate
+                }, onNavigate,
+                textSource: section.dataset.textSource
             });
             viewerSources.set(state, {document: pdfDocument, page: pageNumber});
-        } else state.viewer.schedule();
+        } else {
+            state.viewer.setSource?.(section.dataset.textSource);
+            state.viewer.schedule();
+        }
     }
 
     function apply() {

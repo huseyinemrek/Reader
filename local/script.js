@@ -1910,6 +1910,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             text.style.removeProperty('min-height');
             text.setAttribute('aria-label', result.source === 'ocr' ? 'OCR ile tanınan metin' : 'PDF’nin kendi metin katmanı');
             section.dataset.textSource = result.source;
+            pdfPageStates.get(section)?.viewer?.setSource?.(result.source);
             const stateKind = qualityLimits.length ? 'warning' : 'ready';
             const metadata = [result.engine, result.device,
                 result.modelRevision ? 'Model: ' + result.modelRevision.split(':').map(revision => revision.slice(0, 8)).join(':') : null,
