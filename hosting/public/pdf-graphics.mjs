@@ -17,12 +17,23 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText) {
     if (!bounds) throw new Error('PDF renderer did not record source graphics bounds.');
     const regions = [];
     const gap = Math.max(1, scale * 2);
+    let fillColor = '#000000';
+    const fillColors = [];
     for (let index = 0; index < operators.fnArray.length; index++) {
         const operation = operators.fnArray[index];
+        if ([OPS.save, OPS.paintFormXObjectBegin, OPS.beginGroup].includes(operation)) fillColors.push(fillColor);
+        else if ([OPS.restore, OPS.paintFormXObjectEnd, OPS.endGroup].includes(operation)) fillColor = fillColors.pop() ?? '#000000';
+        else if (operation === OPS.setFillRGBColor) fillColor = operators.argsArray[index][0];
+        else if (operation === OPS.setFillColorN || operation === OPS.setFillTransparent) fillColor = null;
         if (!graphics.has(operation) || bounds.isEmpty(index)) continue;
         // A clipping path is not a visible illustration. PDF.js records its
         // drawing dependencies, so only paths that actually paint are selected.
         if (operation === OPS.constructPath && operators.argsArray[index][0] === OPS.endPath) continue;
+        // White fills are page/paragraph backgrounds, not illustration seeds.
+        // Keep stroked outlines and actual images; their source crops still
+        // include any white knockout shapes painted over them.
+        if (operation === OPS.constructPath && fillColor === '#ffffff' &&
+            [OPS.fill, OPS.eoFill].includes(operators.argsArray[index][0])) continue;
         let box = {
             x0: Math.max(0, Math.floor(bounds.minX(index) * width)),
             y0: Math.max(0, Math.floor(bounds.minY(index) * height)),
@@ -48,7 +59,10 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText) {
     }
     // Isolated hairlines/underlines are not figures; connected chart strokes
     // remain part of their larger source crop.
-    return regions.filter(box => box.x1 - box.x0 > scale * 3 && box.y1 - box.y0 > scale * 3)
+    // Recorded bounds can expand by two 1/256-page cells.
+    return regions.filter(box =>
+        box.x1 - box.x0 > scale * 3 + Math.ceil(width / 128) &&
+        box.y1 - box.y0 > scale * 3 + Math.ceil(height / 128))
         .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
 }
 

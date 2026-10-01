@@ -498,7 +498,10 @@ def main():
                 raise ValueError("Unknown OCR operation.")
             response = {"id": request["id"], "result": result}
         except Exception as error:
-            traceback.print_exc(file=sys.stderr)
+            if "Layout model found no document regions" in str(error):
+                sys.stderr.write(f"Document OCR note: {error}\n")
+            else:
+                traceback.print_exc(file=sys.stderr)
             response = {"id": request.get("id") if isinstance(request, dict) else None, "error": str(error)}
         protocol.write(json.dumps(response, ensure_ascii=False) + "\n")
         protocol.flush()

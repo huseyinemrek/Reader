@@ -157,6 +157,12 @@ test('native mixed and image-only pages retain raster pixels and source reading 
     assert.deepEqual(pixel(imageOnlyCrop, 150, 50), [0, 0, 255, 255]);
     const reopened = createPdfOcr(uploads);
     cleanup.push(() => reopened.shutdown());
+    const nativeCachePath = path.join(uploads, 'pdf', source.bookId, `page-1-v${service.pipelineVersion}-native.json`);
+    const legacyCache = JSON.parse(fs.readFileSync(nativeCachePath, 'utf8'));
+    delete legacyCache.nativeLayoutVersion;
+    legacyCache.text = '';
+    legacyCache.blocks = [figure];
+    fs.writeFileSync(nativeCachePath, JSON.stringify(legacyCache));
     assert.deepEqual((await reopened.getPdfPage({ ...source, page: 1, nativeOnly: true })).blocks, mixed.blocks);
     const cropPath = path.join(uploads, figure.imageUrl.slice('/uploads/'.length));
     fs.writeFileSync(cropPath, 'invalid PNG');
@@ -435,6 +441,10 @@ test('book preferences, explicit generations and cancellation control what reade
     const polled = await request(`${route(native.bookId)}/pdf/pages/1?ocrJob=${manualLease.id}`);
     assert.equal(polled.body.source, 'ocr');
     assert.equal(polled.body.text, recognized);
+    const nextPage = (await request(`${route(native.bookId)}/pdf/pages/2`)).body;
+    assert.equal(nextPage.source, 'native');
+    assert.equal(nextPage.text, body);
+    assert.equal((await request(`${route(native.bookId)}/pdf`)).body.ocrMode, 'off');
     assert.equal((await request(`${route(native.bookId)}/pdf/pages/1`)).body.text, '');
     assert.equal((await request(`${route(native.bookId)}/pdf/pages/1?ocr=0`)).body.text, '');
     const regenerated = await request(`${route(native.bookId)}/pdf/pages/1?ocr=1`);

@@ -267,6 +267,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pdfOcrMode = document.getElementById('pdf-ocr-mode');
     const pdfOcrDescription = document.getElementById('pdf-ocr-description');
     const pdfOcrCurrent = document.getElementById('pdf-ocr-current');
+    const pdfOcrCurrentStatus = document.getElementById('pdf-ocr-current-status');
     const openPageJumpBtn = document.getElementById('open-page-jump');
     const pageJumpModal = document.getElementById('page-jump-modal');
     const pageJumpClose = document.getElementById('page-jump-close');
@@ -294,6 +295,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         pdfOcrDescription.textContent = detected + ' ' + (metadata.automaticOcr
             ? 'Ziyaret edilen sayfalarda OCR açık.'
             : 'Otomatik OCR kapalı; yalnız PDF’nin kendi metni gösterilir.');
+        updateCurrentPageOcrControls();
+    }
+
+    function updateCurrentPageOcrControls(state = null) {
+        if (currentBookType !== 'pdf' || !pdfOcrCurrent) return;
+        pdfOcrCurrent.textContent = `Geçerli sayfayı (Sayfa ${currentPdfPage}) OCR yap / yeniden üret`;
+        if (!pdfOcrCurrentStatus) return;
+        if (state) {
+            pdfOcrCurrentStatus.dataset.state = state.state || '';
+            pdfOcrCurrentStatus.textContent = state.text || '';
+            if (state.title) pdfOcrCurrentStatus.title = state.title;
+            else pdfOcrCurrentStatus.removeAttribute('title');
+            return;
+        }
+        const section = bookContent.querySelector(`.pdf-page[data-page-index="${currentPdfPage}"]`);
+        const textSource = section?.dataset.textSource;
+        if (textSource) {
+            pdfOcrCurrentStatus.dataset.state = 'ready';
+            pdfOcrCurrentStatus.textContent = textSource === 'ocr'
+                ? `Sayfa ${currentPdfPage}: OCR ile tanınan metin gösteriliyor.`
+                : `Sayfa ${currentPdfPage}: PDF’nin kendi metin katmanı gösteriliyor.`;
+        } else {
+            pdfOcrCurrentStatus.dataset.state = '';
+            pdfOcrCurrentStatus.textContent = `Sayfa ${currentPdfPage}`;
+        }
     }
 
     pdfOcrMode.addEventListener('change', async () => {
@@ -311,8 +337,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             text.style.minHeight = text.getBoundingClientRect().height + 'px';
             text.replaceChildren();
             delete section.dataset.textSource;
-            section.querySelector('[data-pdf-ocr]').disabled = true;
-            section.querySelector('.pdf-text-status').textContent = 'OCR tercihi kaydediliyor…';
+            section.querySelector('[data-pdf-ocr]')?.setAttribute('disabled', 'true');
+            const status = section.querySelector('.pdf-text-status');
+            if (status) status.textContent = 'OCR tercihi kaydediliyor…';
         }
         try {
             const response = await authFetch('/api/books/' + encodeURIComponent(currentBookId) + '/pdf/ocr', {
@@ -867,6 +894,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             bookContent.querySelectorAll('.pdf-page').forEach(p => {
                 p.classList.toggle('active-pdf-page', Number(p.dataset.pageIndex) === currentPdfPage);
             });
+            updateCurrentPageOcrControls();
         } else if (currentSettings.readingMode === 'paged') {
             bookViewport.style.setProperty('--rendered-pages', '1');
             const count = Math.max(1, Math.round(bookViewport.scrollWidth / bookViewport.clientWidth));
@@ -1802,16 +1830,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         const button = section.querySelector('[data-pdf-ocr]');
         const token = session;
         const bookId = currentBookId;
-        button.disabled = true;
-        button.textContent = forceOcr ? 'OCR yeniden üretiliyor…' : 'Metin hazırlanıyor…';
-        status.dataset.state = 'loading';
-        status.removeAttribute('title');
+        const isCurrent = () => Number(section.dataset.pageIndex) === currentPdfPage;
+        if (button) {
+            button.disabled = true;
+            button.textContent = forceOcr ? 'OCR yeniden üretiliyor…' : 'Metin hazırlanıyor…';
+        }
+        if (status) {
+            status.dataset.state = 'loading';
+            status.removeAttribute('title');
+        }
         const wantsOcr = forceOcr || explicitJob || currentPdfMetadata.automaticOcr;
-        status.textContent = wantsOcr
+        const loadingMessage = wantsOcr
             ? readerRuntime.mode === 'vps'
                 ? 'OCR metni hazırlanıyor; arka plan kuyruğu ve kaynak PDF birbirinden bağımsızdır.'
                 : 'Yerel OCR metni hazırlanıyor; ilk kullanımda model yüklenebilir.'
             : 'PDF’nin kendi metin katmanı okunuyor · OCR çalıştırılmıyor.';
+        if (status) status.textContent = loadingMessage;
+        if (isCurrent()) {
+            pdfOcrCurrent.disabled = true;
+            pdfOcrCurrent.textContent = forceOcr ? `Sayfa ${pageNumber} OCR yeniden üretiliyor…` : `Sayfa ${pageNumber} metni hazırlanıyor…`;
+            if (pdfOcrCurrentStatus) {
+                pdfOcrCurrentStatus.dataset.state = 'loading';
+                pdfOcrCurrentStatus.removeAttribute('title');
+                pdfOcrCurrentStatus.textContent = `Sayfa ${pageNumber}: ${loadingMessage}`;
+            }
+        }
         text.setAttribute('aria-busy', 'true');
         try {
             const pageUrl = '/api/books/' + encodeURIComponent(bookId) + '/pdf/pages/' + pageNumber;
@@ -1831,11 +1874,22 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!['pending', 'processing'].includes(result.status)) throw new Error('Geçersiz OCR kuyruk durumu.');
                 if (!result.jobId) throw new Error('OCR kuyruğu iş kimliği döndürmedi.');
                 jobId = result.jobId;
-                status.dataset.state = result.status;
-                status.textContent = (result.status === 'processing' ? 'OCR işleniyor' : 'OCR kuyrukta bekliyor') +
+                const pollState = result.status;
+                const pollText = (result.status === 'processing' ? 'OCR işleniyor' : 'OCR kuyrukta bekliyor') +
                     (result.mode === 'compute' ? ' · Evde GPU worker’ını başlatın.' : ' · VPS arka planda çalışıyor.') +
                     ' Kaynak PDF kullanılabilir; metin hazır olduğunda otomatik görünür.';
-                button.textContent = result.status === 'processing' ? 'OCR işleniyor…' : 'OCR kuyrukta…';
+                if (status) {
+                    status.dataset.state = pollState;
+                    status.textContent = pollText;
+                }
+                if (button) button.textContent = result.status === 'processing' ? 'OCR işleniyor…' : 'OCR kuyrukta…';
+                if (isCurrent()) {
+                    pdfOcrCurrent.textContent = result.status === 'processing' ? `Sayfa ${pageNumber} OCR işleniyor…` : `Sayfa ${pageNumber} OCR kuyrukta…`;
+                    if (pdfOcrCurrentStatus) {
+                        pdfOcrCurrentStatus.dataset.state = pollState;
+                        pdfOcrCurrentStatus.textContent = `Sayfa ${pageNumber}: ${pollText}`;
+                    }
+                }
                 await waitForCompute(signal);
             }
             signal.throwIfAborted();
@@ -1856,14 +1910,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             text.style.removeProperty('min-height');
             text.setAttribute('aria-label', result.source === 'ocr' ? 'OCR ile tanınan metin' : 'PDF’nin kendi metin katmanı');
             section.dataset.textSource = result.source;
-            status.dataset.state = qualityLimits.length ? 'warning' : 'ready';
+            const stateKind = qualityLimits.length ? 'warning' : 'ready';
             const metadata = [result.engine, result.device,
                 result.modelRevision ? 'Model: ' + result.modelRevision.split(':').map(revision => revision.slice(0, 8)).join(':') : null,
                 Number.isFinite(result.elapsedMs) ? (result.elapsedMs / 1000).toFixed(1) + ' sn' : null].filter(Boolean);
-            status.title = [result.engine, result.device, result.modelRevision, ...qualityLimits].filter(Boolean).join('\n');
+            const statusTitle = [result.engine, result.device, result.modelRevision, ...qualityLimits].filter(Boolean).join('\n');
             const nativeText = result.source === 'native'
                 ? (result.text ?? result.blocks.map(block => block.text || '').join(' ')).trim() : '';
-            status.textContent = (result.source === 'ocr'
+            const statusSummary = (result.source === 'ocr'
                 ? readerRuntime.mode === 'vps' ? 'OCR ile tanınan metin · VPS önbelleği' : 'Yerel OCR ile tanınan metin'
                 : !nativeText ? 'PDF’nin kendi metin katmanı · Bu sayfada metin yok; otomatik OCR başlatılmadı.'
                     : nativeText.length < 100 ? 'PDF’nin kendi metin katmanı · Bu sayfada kısa metin var; otomatik OCR başlatılmadı.'
@@ -1871,35 +1925,48 @@ document.addEventListener('DOMContentLoaded', async () => {
                 (metadata.length ? ' · ' + metadata.join(' · ') : '') +
                 (qualityLimits.length ? ` · ${qualityLimits.length} bölgede matematik eşleşmesi belirsiz; kaynakla karşılaştırın.` :
                     result.source === 'ocr' ? ' · Tanıma hataları olabilir; kaynakla karşılaştırın.' : '');
+            if (status) {
+                status.dataset.state = stateKind;
+                status.title = statusTitle;
+                status.textContent = statusSummary;
+            }
+            if (isCurrent()) {
+                pdfOcrCurrent.disabled = false;
+                updateCurrentPageOcrControls({
+                    state: stateKind,
+                    text: `Sayfa ${pageNumber}: ${statusSummary}`,
+                    title: statusTitle
+                });
+            }
             if (!isNavigatingPage && !pdfLayoutView.isDragging) restorePdfReadingAnchor(anchor);
         } catch (error) {
             if (signal.aborted || token !== session || !section.isConnected) return;
             console.error('PDF metni hazırlanamadı:', error);
-            status.dataset.state = 'error';
-            status.textContent = 'Metin hazırlanamadı: ' + error.message + ' · OCR düğmesiyle yeniden deneyebilirsiniz.';
+            if (status) {
+                status.dataset.state = 'error';
+                status.textContent = 'Metin hazırlanamadı: ' + error.message + ' · OCR düğmesiyle yeniden deneyebilirsiniz.';
+            }
+            if (isCurrent() && pdfOcrCurrentStatus) {
+                pdfOcrCurrentStatus.dataset.state = 'error';
+                pdfOcrCurrentStatus.textContent = `Sayfa ${pageNumber} metni hazırlanamadı: ${error.message} · Ayarlar altındaki düğmeyle yeniden deneyebilirsiniz.`;
+            }
         } finally {
             if (state.abort === controller && !ocrPolicyChanging && section.isConnected && pdfPageStates.get(section) === state) {
                 text.setAttribute('aria-busy', 'false');
-                button.disabled = false;
-                button.textContent = 'Bu sayfayı OCR yap / yeniden üret';
+                if (button) {
+                    button.disabled = false;
+                    button.textContent = 'Bu sayfayı OCR yap / yeniden üret';
+                }
+                if (isCurrent()) {
+                    pdfOcrCurrent.disabled = false;
+                    pdfOcrCurrent.textContent = `Geçerli sayfayı (Sayfa ${currentPdfPage}) OCR yap / yeniden üret`;
+                }
             }
         }
     }
 
     function createPdfPageSection(pageNumber) {
-        const tools = document.createElement('div');
-        tools.className = 'pdf-page-tools';
-        const status = document.createElement('span');
-        status.className = 'pdf-text-status';
-        status.setAttribute('role', 'status');
-        status.textContent = 'Metin hazırlanıyor…';
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'mode-btn';
-        button.dataset.pdfOcr = pageNumber;
-        button.textContent = 'Bu sayfayı OCR yap / yeniden üret';
-        tools.append(status, button);
-        return createPdfPage(pageNumber, tools);
+        return createPdfPage(pageNumber);
     }
 
     function makePdfPageText(result, assetToken) {

@@ -81,6 +81,10 @@ async function makePdfGraphics(directory) {
     }
     add(stream('/Type /XObject /Subtype /Image /Width 16 /Height 16 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode', deflateSync(pixels)));
     add(stream('', Buffer.from([
+        // Some digital books paint a white content rectangle behind real text.
+        'q 1 1 1 rg 20 20 320 440 re f Q',
+        // Quantized render bounds must not turn a text underline into a figure.
+        'q 0 0 1 rg 40 399 200 0.4 re f Q',
         'BT /F1 14 Tf 40 400 Td (Prose above the native figure.) Tj ET',
         'q 160 0 0 100 60 270 cm /Figure Do Q',
         'q 0.12549 0.78431 0.25098 rg 60 220 40 24 re f Q',

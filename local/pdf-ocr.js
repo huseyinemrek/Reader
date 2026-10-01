@@ -15,6 +15,8 @@ const MAX_RENDER_DIMENSION = 3200;
 const BASE_RENDER_SCALE = 2.5;
 const CACHE_VERSION = 15;
 const CLASSIFIER_VERSION = 2;
+// Native layout changes must not invalidate recognized OCR or worker leases.
+const NATIVE_LAYOUT_VERSION = 1;
 const PDFJS_PACKAGE_DIR = path.dirname(requireFromHere.resolve('pdfjs-dist/package.json'));
 const STANDARD_FONT_DATA_URL = `${path.join(PDFJS_PACKAGE_DIR, 'standard_fonts').replace(/\\/g, '/')}/`;
 const CMAP_URL = `${path.join(PDFJS_PACKAGE_DIR, 'cmaps').replace(/\\/g, '/')}/`;
@@ -303,7 +305,8 @@ function createPdfOcr(uploadsDirectory) {
                 if (!imageStat.isFile() || imageStat.size === 0) return null;
             }
             if (cached.page !== pageNumber || cached.version !== CACHE_VERSION ||
-                (source === 'native' && cached.sourceVersion !== sourceVersion(fileStat)) ||
+                (source === 'native' && (cached.nativeLayoutVersion !== NATIVE_LAYOUT_VERSION ||
+                    cached.sourceVersion !== sourceVersion(fileStat))) ||
                 cached.pdfSize !== fileStat.size || cached.pdfMtimeMs !== fileStat.mtimeMs ||
                 typeof cached.text !== 'string' || !validBlocks(cached.blocks, cached.text) || cached.source !== source ||
                 (cached.confidence !== null && !Number.isFinite(cached.confidence)) ||
@@ -363,6 +366,7 @@ function createPdfOcr(uploadsDirectory) {
             text: pageResult.text,
             blocks: pageResult.blocks,
             source: pageResult.source,
+            nativeLayoutVersion: pageResult.source === 'native' ? NATIVE_LAYOUT_VERSION : undefined,
             confidence: pageResult.confidence,
             engine: pageResult.engine,
             device: pageResult.device,

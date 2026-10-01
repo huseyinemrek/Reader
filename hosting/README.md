@@ -109,6 +109,8 @@ PDF.js 6 ile yerleşik font metadata’sı okunur; normal/italik/oblik/kalın ve
 
 Ortak `pdf-graphics.mjs` resim ve vektör çizimleri tarayıcıda kaynak PDF’den kırpar; döndürme, clipping ve maskeler korunur. Görseller yalnız metin düzeninde de kaynak sırasıyla metin arasına girer; görsel içindeki etiketler yinelenmez. Yalnız resim içeren kapak/sayfa gerçek görüntüyü gösterir, metin veya OCR uydurulmaz. Bu işlem mevcut Range PDF kaynağını kullanır; Storage’a ek dosya yazmaz ve eski kitabı tekrar yüklemeyi gerektirmez.
 
+Beyaz sayfa/paragraf dolguları ve ince alt çizgiler ayrı görsel sayılmaz; bu bölgelerdeki yerleşik metin seçilebilir paragraf olarak kalır.
+
 Kütüphaneden veya üst okuyucu menüsündeki `+` ile birden fazla dosya seçebilirsiniz; sonraki seçim kuyruğa eklenir. Hazırlama ve kayıt sonlandırma belirsiz aşamalar, Storage aktarımı gerçek byte yüzdesidir. Orijinal kitap, düzen paketi ve kapak aktarımı bitip Firestore kaydı tamamlanmadan `%100` gösterilmez. Dairenin tooltip’i hazırlanan gerçek kitap adını ve aşamasını gösterir. Kuyruk okuyucu etkileşimini engellemez; tamamlanma yalnız kütüphaneyi sessizce yeniler.
 
 Kuyruk dosyaları yalnız açık sekmenin belleğindedir, IndexedDB/localStorage’da yükleme işi tutulmaz. Bekleyen/çalışan işte kapatma/yenileme uyarısı vardır; sekme kapandıktan sonra otomatik devam yoktur. Tamamlanmış kitaplar Storage/Firestore’da kalır. Hatalı iş sonraki kitabı durdurmaz; yeniden deneme veya listeden kaldırma sunulur. Çıkış/hesap değişimi eski hesabın işlerini iptal eder. Kuyruk OCR sistemi değildir.
