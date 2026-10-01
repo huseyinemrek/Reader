@@ -372,6 +372,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
         await t.test('nested source bookmarks navigate both named and page-reference destinations', async () => {
             await openPdf(page, base);
             await openSidebar(page, 'toc');
+            await waitForPages(page);
             const outline = await page.$$eval('#toc-list a', links => links.map(link => ({
                 title: link.textContent, page: Number(link.dataset.pdfPage),
                 parent: link.closest('ul').parentElement.querySelector(':scope > a')?.textContent ?? null

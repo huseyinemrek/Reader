@@ -16,7 +16,7 @@ const BASE_RENDER_SCALE = 2.5;
 const CACHE_VERSION = 15;
 const CLASSIFIER_VERSION = 2;
 // Native layout changes must not invalidate recognized OCR or worker leases.
-const NATIVE_LAYOUT_VERSION = 1;
+const NATIVE_LAYOUT_VERSION = 2;
 const PDFJS_PACKAGE_DIR = path.dirname(requireFromHere.resolve('pdfjs-dist/package.json'));
 const STANDARD_FONT_DATA_URL = `${path.join(PDFJS_PACKAGE_DIR, 'standard_fonts').replace(/\\/g, '/')}/`;
 const CMAP_URL = `${path.join(PDFJS_PACKAGE_DIR, 'cmaps').replace(/\\/g, '/')}/`;

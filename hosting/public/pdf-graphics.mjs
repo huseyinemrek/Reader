@@ -11,8 +11,20 @@ function graphicsOperations(OPS) {
     ].filter(Number.isInteger));
 }
 
-function graphicRegions(page, operators, OPS, width, height, scale, hasText) {
+const overlaps = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+
+function imageOperations(OPS) {
+    return new Set([
+        OPS.paintImageXObject, OPS.paintImageXObjectRepeat,
+        OPS.paintInlineImageXObject, OPS.paintInlineImageXObjectGroup,
+        OPS.paintImageMaskXObject, OPS.paintImageMaskXObjectGroup,
+        OPS.paintImageMaskXObjectRepeat, OPS.paintSolidColorImageMask
+    ].filter(Number.isInteger));
+}
+
+function graphicRegions(page, operators, OPS, width, height, scale, hasText, links = []) {
     const graphics = graphicsOperations(OPS);
+    const images = imageOperations(OPS);
     const bounds = page.recordedBBoxes;
     if (!bounds) throw new Error('PDF renderer did not record source graphics bounds.');
     const regions = [];
@@ -38,7 +50,8 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText) {
             x0: Math.max(0, Math.floor(bounds.minX(index) * width)),
             y0: Math.max(0, Math.floor(bounds.minY(index) * height)),
             x1: Math.min(width, Math.ceil(bounds.maxX(index) * width)),
-            y1: Math.min(height, Math.ceil(bounds.maxY(index) * height))
+            y1: Math.min(height, Math.ceil(bounds.maxY(index) * height)),
+            hasImage: images.has(operation)
         };
         if (box.x1 <= box.x0 || box.y1 <= box.y0) continue;
         // Page-background fills must not turn otherwise reflowable prose into
@@ -50,8 +63,8 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText) {
             if (box.x0 <= candidate.x1 + gap && box.x1 + gap >= candidate.x0 &&
                 box.y0 <= candidate.y1 + gap && box.y1 + gap >= candidate.y0) {
                 box = { x0: Math.min(box.x0, candidate.x0), y0: Math.min(box.y0, candidate.y0),
-                    x1: Math.max(box.x1, candidate.x1), y1: Math.max(box.y1, candidate.y1) };
-                regions.splice(other, 1);
+                    x1: Math.max(box.x1, candidate.x1), y1: Math.max(box.y1, candidate.y1),
+                    hasImage: candidate.hasImage || box.hasImage };
                 other = 0;
             } else other++;
         }
@@ -60,10 +73,12 @@ function graphicRegions(page, operators, OPS, width, height, scale, hasText) {
     // Isolated hairlines/underlines are not figures; connected chart strokes
     // remain part of their larger source crop.
     // Recorded bounds can expand by two 1/256-page cells.
-    return regions.filter(box =>
-        box.x1 - box.x0 > scale * 3 + Math.ceil(width / 128) &&
-        box.y1 - box.y0 > scale * 3 + Math.ceil(height / 128))
-        .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+    return regions.filter(box => {
+        if (box.x1 - box.x0 <= scale * 3 + Math.ceil(width / 128) ||
+            box.y1 - box.y0 <= scale * 3 + Math.ceil(height / 128)) return false;
+        if (!box.hasImage && links.some(link => overlaps(link.bbox, box))) return false;
+        return true;
+    }).sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
 }
 
 /** Extract native text and source-rendered illustrations without invoking OCR.
@@ -83,7 +98,7 @@ export async function extractNativePdfPage(page, pdfDocument, { OPS, viewport, c
     try {
         await page.render({ canvas, canvasContext: canvas.getContext('2d'), viewport,
             recordOperations: true, background: 'rgb(255,255,255)' }).promise;
-        const regions = graphicRegions(page, operators, OPS, width, height, viewport.scale, textBlocks.length > 0);
+        const regions = graphicRegions(page, operators, OPS, width, height, viewport.scale, textBlocks.length > 0, links);
         const figures = [];
         for (const bbox of regions) {
             const crop = createCanvas(bbox.x1 - bbox.x0, bbox.y1 - bbox.y0);
