@@ -141,6 +141,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 2px 2px 0;
     font: 12px/1.4 system-ui, sans-serif;
@@ -218,6 +219,24 @@
     margin: 0 auto;
     background: #ffffff;
 }
+.pdf-original-surface[data-pdf-selectable="true"] {
+    cursor: text;
+}
+
+
+.pdf-source-selection-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+}
+
+.pdf-source-selection-highlight {
+    position: absolute;
+    background: rgba(45, 118, 230, 0.3);
+    transform-origin: 0 0;
+    pointer-events: none;
+}
 
 .pdf-link-layer {
     position: absolute;
@@ -247,6 +266,15 @@
 .pdf-render-status {
     font: 13px/1.4 system-ui, sans-serif;
     overflow-wrap: anywhere;
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    max-width: calc(100% - 16px);
+    z-index: 3;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.95);
+    color: #333;
+    pointer-events: none;
 }
 
 .pdf-render-status:empty {

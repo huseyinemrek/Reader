@@ -337,6 +337,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             text.style.minHeight = text.getBoundingClientRect().height + 'px';
             text.replaceChildren();
             delete section.dataset.textSource;
+            state.ocrPage = null;
+            pdfLayoutView.sync(section, state);
             section.querySelector('[data-pdf-ocr]')?.setAttribute('disabled', 'true');
             const status = section.querySelector('.pdf-text-status');
             if (status) status.textContent = 'OCR tercihi kaydediliyor…';
@@ -1300,7 +1302,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     pagedNextBtn.addEventListener('click', goToNextPage);
     bookViewport.addEventListener('click', event => {
         if (pdfLayoutView.isDragging || currentSettings.readingMode !== 'paged' ||
-            event.target.closest('a,button,input,select,[role="separator"]') || window.getSelection().toString()) return;
+            event.target.closest('a,button,input,select,[role="separator"],.pdf-page-image-column') || window.getSelection().toString()) return;
         const rect = bookViewport.getBoundingClientRect();
         const x = event.clientX - rect.left;
         if (x < rect.width * 0.25) goToPrevPage();
@@ -1897,6 +1899,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (result.pipelineVersion !== PDF_PIPELINE_VERSION) {
                 text.replaceChildren();
                 delete section.dataset.textSource;
+                state.ocrPage = null;
+                pdfLayoutView.sync(section, state);
                 throw new Error(`Uyumsuz sunucu yanıtı (beklenen belge hattı: ${PDF_PIPELINE_VERSION}). Sunucuyu yeniden başlatın, ardından OCR sonucunu yeniden üretin.`);
             }
             const qualityLimits = result.qualityLimits ?? [];
@@ -1910,7 +1914,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             text.style.removeProperty('min-height');
             text.setAttribute('aria-label', result.source === 'ocr' ? 'OCR ile tanınan metin' : 'PDF’nin kendi metin katmanı');
             section.dataset.textSource = result.source;
-            pdfPageStates.get(section)?.viewer?.setSource?.(result.source);
+            state.ocrPage = result.source === 'ocr' ? result : null;
+            pdfLayoutView.sync(section, state);
             const stateKind = qualityLimits.length ? 'warning' : 'ready';
             const metadata = [result.engine, result.device,
                 result.modelRevision ? 'Model: ' + result.modelRevision.split(':').map(revision => revision.slice(0, 8)).join(':') : null,

@@ -107,6 +107,10 @@ Range yanıtının `206 Partial Content` olması ve okunabilir, doğru bir `Cont
 
 PDF.js 6 ile yerleşik font metadata’sı okunur; normal/italik/oblik/kalın ve göreli başlık/dipnot ölçüleri metin parçalarıyla korunur. Kullanıcının seçtiği aile, renk ve temel boyut kaynak vurgusunu silmez. **Ayarlar → PDF Görünümü** yalnız metin veya iki yönlü kaynak PDF/metin düzeni sunar; ayırıcı fare/dokunma ve ok/Shift/Home/End tuşlarıyla ayarlanır. Kaynak sayfa döşemelerle %500’e kadar yeniden çizilir. Yer işareti yoksa kütüphane kaydından uydurma içindekiler kullanılmaz.
 
+**Sığdır** sayfanın tamamını, **Doldur** sütun genişliğini kullanır; Doldur ekran/ayırıcı değişimini izler. Metin kaydırması büyütülmüş kaynağın aynı sayfadaki başlangıç/orta/son oranını izler, paragrafla birebir eşleştirme değildir. Kaynağı elle kaydırmak metni değiştirmez; sonraki metin kaydırması eşzamanlamayı sürdürür.
+
+Kaynak PDF’nin yerleşik metni fareyle seçilip **Ctrl/Cmd+C** veya **Kopyala** ile kopyalanır; alan odaktayken **Ctrl/Cmd+A** sayfa metnini seçer. Kaynak metin ikinci bir DOM metin katmanına eklenmez; boş görsel vurgu kutuları, metin/erişilebilirlik ağacı üzerinden sesli okumada çift kitap metni oluşmasını önler. Karakter konumu PDF.js öğe dönüşümü ve göreli ölçüyle belirlenir. Hosting’de OCR yoktur; yalnız taranmış sayfalarda kaynak üzerinden kopyalanabilir metin üretilemez.
+
 Ortak `pdf-graphics.mjs` resim ve vektör çizimleri tarayıcıda kaynak PDF’den kırpar; döndürme, clipping ve maskeler korunur. Görseller yalnız metin düzeninde de kaynak sırasıyla metin arasına girer; görsel içindeki etiketler yinelenmez. Yalnız resim içeren kapak/sayfa gerçek görüntüyü gösterir, metin veya OCR uydurulmaz. Bu işlem mevcut Range PDF kaynağını kullanır; Storage’a ek dosya yazmaz ve eski kitabı tekrar yüklemeyi gerektirmez.
 
 Beyaz sayfa/paragraf dolguları ve ince alt çizgiler ayrı görsel sayılmaz; bu bölgelerdeki yerleşik metin seçilebilir paragraf olarak kalır.

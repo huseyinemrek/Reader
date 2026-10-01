@@ -63,6 +63,8 @@ Hazır paket `DATA_DIR/layout-cache/<bookId>/<sourceVersion>/` altında saklanı
 
 PDF resimleri ve vektör çizimleri OCR kapalıyken de kaynak koordinatlarına göre metin arasına yerleştirilir; yalnız görsel içeren sayfa boş kalmaz. Ortak çıkarıcı PDF.js’in kaynak çizimini kullanır; döndürme, clipping ve maskeler korunur. `uploads/pdf/<bookId>/page-N-v15-native*.png` ve ayrı native JSON önbelleği kaynak boyutu/zamanıyla doğrulanır; OCR cache’ini ezmez. Oluşturulan native görseller de kitap sahibinin kimlik doğrulamasıyla sunulur; kitapları yeniden yüklemek gerekmez.
 
+Kaynak viewer’da **Sığdır** tam sayfayı, **Doldur** değişen sütun genişliğini kullanır. Metin kaydırması büyütülmüş PDF’yi aynı sayfanın okuma oranına göre izletir; kaynakta elle kaydırma metni oynatmaz. Kaynak üzerinde fareyle seçim, sözcüğe çift tıklama, **Ctrl/Cmd+A/C** ve **Kopyala** vardır. İkinci DOM metin katmanı oluşturulmaz: seçim metni bellekte, vurgu kutuları boş olduğundan metin/erişilebilirlik ağacında çift kitap metni yoktur. Hazır gerçek OCR metni kaynak bölgeleri düzeyinde seçilir; formüller LaTeX olarak kopyalanır, bulunmayan karakter konumları tahmin edilmez.
+
 
 
 ## OCR modları ve kalıcı kuyruk

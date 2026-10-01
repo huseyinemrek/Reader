@@ -676,19 +676,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
                     assert.match(await page.$eval('.pdf-page-text', element => element.textContent), /He whispered/);
                     continue;
                 }
-                await page.waitForFunction(() => Array.from(document.querySelectorAll('.pdf-original-surface canvas'))
-                    .some(canvas => {
-                        if (!canvas.width || !canvas.height) return false;
-                        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
-                        let light = false, dark = false;
-                        for (let i = 0; i < pixels.length; i += 4) {
-                            if (pixels[i] > 240 && pixels[i + 1] > 240 && pixels[i + 2] > 240) light = true;
-                            if (pixels[i] < 100 && pixels[i + 1] < 100 && pixels[i + 2] < 100 && pixels[i + 3] > 0) dark = true;
-                            if (light && dark) return true;
-                        }
-                        return false;
-                    }), { timeout: 20000 });
-                const geometry = await page.evaluate(() => {
+                const rendered = await page.waitForFunction(() => {
                     const text = document.querySelector('.pdf-page-text').getBoundingClientRect();
                     const image = document.querySelector('.pdf-page-image-column').getBoundingClientRect();
                     let light = false, dark = false;
@@ -702,8 +690,10 @@ for (const mode of ['local', 'vps', 'hosting']) {
                         }
                         if (light && dark) break;
                     }
-                    return { textLeft: text.left, imageLeft: image.left, textWidth: text.width, imageWidth: image.width, light, dark };
-                });
+                    return light && dark ? { textLeft: text.left, imageLeft: image.left, textWidth: text.width, imageWidth: image.width, light, dark } : null;
+                }, {timeout: 20000});
+                const geometry = await rendered.jsonValue();
+                await rendered.dispose();
                 assert.ok(geometry.light && geometry.dark, 'Original PDF view must contain rendered paper and source ink');
                 assert.ok(geometry.textWidth > 100 && geometry.imageWidth > 100);
                 assert.equal(geometry.textLeft > geometry.imageLeft, layout === 'text-right');
@@ -729,10 +719,128 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 await page.click('[data-pdf-zoom="fit"]');
                 await page.waitForFunction(width => Math.abs(document.querySelector('.pdf-original-surface').getBoundingClientRect().width - width) < 2,
                     { timeout: 10000 }, fitWidth);
+                await page.click('[data-pdf-zoom="fill"]');
+                await page.waitForFunction(() => {
+                    const source = document.querySelector('.pdf-original-viewport');
+                    const paper = source.querySelector('.pdf-original-surface');
+                    return Math.abs(paper.getBoundingClientRect().width - source.clientWidth) < 2;
+                });
+                await page.setViewport({ width: 1500, height: 960 });
+                await page.waitForFunction(() => {
+                    const source = document.querySelector('.pdf-original-viewport');
+                    return Math.abs(source.querySelector('.pdf-original-surface').getBoundingClientRect().width - source.clientWidth) < 2;
+                });
+                await page.setViewport({ width: 1400, height: 960 });
+                await page.click('[data-pdf-zoom="fit"]');
                 assert.equal(Number(new URL(page.url()).searchParams.get('page')), 2);
             }
             await jumpTo(page, 3);
             await page.waitForFunction(() => document.querySelector('.pdf-page-text')?.textContent.includes('page 3.'));
+        });
+
+        await t.test('source PDF copy stays out of speech and text scrolling follows the source', async () => {
+            await page.setViewport({ width: 1400, height: 800 });
+            await openPdf(page, base);
+            await openSidebar(page, 'settings');
+            await page.select('#pdf-layout', 'text-right');
+            await page.$eval('#font-size-slider', element => {
+                element.value = '48'; element.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            await page.$eval('#paragraph-spacing-slider', element => {
+                element.value = '3'; element.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            await page.click('#settings-close');
+            await page.waitForSelector('.pdf-original-surface[data-pdf-selectable="true"]', {timeout: 5000});
+            await page.click('[data-pdf-zoom="fit"]');
+            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+            const word = await page.$eval('.pdf-original-surface', element => {
+                const rect = element.getBoundingClientRect();
+                return {x: rect.left + 44 / 500 * rect.width, y: rect.top + 31 / 650 * rect.height};
+            });
+            await page.mouse.click(word.x, word.y, { count: 2 });
+            await page.waitForSelector('.pdf-source-selection-highlight', {timeout: 5000});
+            await context.overridePermissions(base, ['clipboard-read', 'clipboard-write']);
+            await page.keyboard.down('Control');
+            await page.keyboard.press('c');
+            await page.keyboard.up('Control');
+            assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'Native');
+            await page.keyboard.down('Control');
+            await page.keyboard.press('a');
+            await page.keyboard.up('Control');
+            await page.click('.pdf-copy-btn');
+            const copied = await page.evaluate(() => navigator.clipboard.readText());
+            assert.match(copied, /Native typography document, page 2\./);
+            assert.match(copied, /He whispered remember me, then fell silent\./);
+            assert.match(copied, /A smaller footnote\./);
+            assert.equal(await page.$eval('.pdf-original-viewport', element => element.textContent), '');
+            const ax = await page.createCDPSession();
+            try {
+                const { nodes } = await ax.send('Accessibility.getFullAXTree');
+                const spoken = nodes.filter(node => !node.ignored && node.role?.value === 'StaticText')
+                    .map(node => node.name?.value || '').join('\n');
+                assert.equal(spoken.split('Native typography document, page 2.').length - 1, 1,
+                    'The source must not add a second copy of book prose to the speech tree');
+            } finally { await ax.detach(); }
+            await page.click('[data-pdf-zoom="in"]');
+            await page.click('.pdf-copy-btn');
+            assert.equal(await page.evaluate(() => navigator.clipboard.readText()), copied,
+                'Zoom must preserve the selected source text');
+            for (const readingMode of ['paged', 'scroll']) {
+                for (const layout of ['text-right', 'text-left']) {
+                    await openSidebar(page, 'settings');
+                    await page.select('#pdf-layout', layout);
+                    await page.click(readingMode === 'paged' ? '#mode-paged-btn' : '#mode-scroll-btn');
+                    await page.click('#settings-close');
+                    const source = '#pdf-page-2 .pdf-original-viewport';
+                    await page.click('#pdf-page-2 [data-pdf-zoom="fill"]');
+                    await page.waitForFunction(selector => {
+                        const original = document.querySelector(selector);
+                        return original.scrollHeight - original.clientHeight > 100;
+                    }, {}, source);
+                    for (const fraction of [0, 0.5, 1]) {
+                        await page.evaluate(({readingMode, fraction}) => {
+                            const text = document.querySelector('#pdf-text-2').getBoundingClientRect();
+                            if (readingMode === 'paged') {
+                                const viewport = document.getElementById('book-viewport');
+                                const top = viewport.getBoundingClientRect().top + viewport.clientTop;
+                                const range = text.height - viewport.clientHeight;
+                                if (range <= 100) throw new Error('Fixture text must overflow the reading viewport');
+                                viewport.scrollTo({top: viewport.scrollTop + text.top - top + fraction * range, behavior: 'instant'});
+                            } else {
+                                const range = text.height - innerHeight;
+                                if (range <= 100) throw new Error('Fixture text must overflow the window');
+                                window.scrollTo({top: scrollY + text.top + fraction * range, behavior: 'instant'});
+                            }
+                        }, {readingMode, fraction});
+                        await page.waitForFunction(({source, fraction}) => {
+                            const original = document.querySelector(source);
+                            const ratio = original.scrollTop / (original.scrollHeight - original.clientHeight);
+                            return Math.abs(ratio - fraction) < 0.04;
+                        }, {timeout: 5000}, {source, fraction});
+                    }
+                    const before = await page.evaluate(mode => mode === 'paged'
+                        ? document.getElementById('book-viewport').scrollTop : scrollY, readingMode);
+                    await page.$eval(source, element => {
+                        element.dispatchEvent(new WheelEvent('wheel', {bubbles: true, deltaY: -100}));
+                        element.scrollTop = 0;
+                    });
+                    await page.waitForFunction(selector => document.querySelector(selector).scrollTop === 0, {}, source);
+                    assert.equal(await page.evaluate(mode => mode === 'paged'
+                        ? document.getElementById('book-viewport').scrollTop : scrollY, readingMode), before,
+                    'Panning the source must not move the readable text');
+                }
+            }
+            await openSidebar(page, 'settings');
+            await page.click('#mode-paged-btn');
+            await page.select('#pdf-layout', 'text-only');
+            await page.$eval('#font-size-slider', element => {
+                element.value = '32'; element.dispatchEvent(new Event('input', {bubbles: true}));
+            });
+            await page.$eval('#paragraph-spacing-slider', element => {
+                element.value = '1.5'; element.dispatchEvent(new Event('input', {bubbles: true}));
+            });
+            await page.click('#settings-close');
+            await page.setViewport({width: 1400, height: 960});
         });
 
         await t.test('real background uploads accept a second file while reading without route or position resets', async () => {

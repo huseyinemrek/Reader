@@ -1,11 +1,14 @@
+import { PdfSourceSelection } from './pdf-source-selection.mjs';
+
 // Render only visible tiles at the current zoom and device pixel ratio. The page
 // surface can grow to 500% without allocating a page-sized high-resolution canvas.
 window.PdfPageViewer = class PdfPageViewer {
-    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate, textSource = null} = {}) {
+    constructor(column, pdfDocument, pageNumber, {zoom = null, onZoom, onNavigate, onLayout, textSource = null} = {}) {
         this.column = column;
         this.zoom = zoom;
         this.onZoom = onZoom;
         this.onNavigate = onNavigate;
+        this.onLayout = onLayout;
         this.pdfDocument = pdfDocument;
         this.tiles = new Map();
         this.links = [];
@@ -65,6 +68,14 @@ window.PdfPageViewer = class PdfPageViewer {
         this.controls.appendChild(this.output);
         this.plus = button('in', '+', 'PDF yakınlaştır (Ctrl +)');
         button('fit', 'Sığdır', 'PDF sayfasının tamamını sığdır (Ctrl 0)');
+        button('fill', 'Doldur', 'PDF sayfasını sütun genişliğine doldur');
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'mode-btn pdf-copy-btn';
+        copy.textContent = 'Kopyala';
+        copy.title = 'PDF üzerinde seçilen metni kopyala (Ctrl C)';
+        copy.addEventListener('click', () => this.selection?.copy());
+        this.controls.appendChild(copy);
         this.footer.appendChild(this.controls);
 
         this.status = document.createElement('div');
@@ -143,6 +154,8 @@ window.PdfPageViewer = class PdfPageViewer {
             if (this.destroyed) return;
             this.page = page;
             this.base = page.getViewport({scale: 96 / 72});
+            this.selection = new PdfSourceSelection(this);
+            this.selection.setOcrPage(this.ocrPage);
             void this.loadLinks();
             this.schedule();
         }).catch(error => {
@@ -161,15 +174,27 @@ window.PdfPageViewer = class PdfPageViewer {
 
     setZoom(action) {
         if (!this.page || this.destroyed || !this.layout()) return;
-        const next = action === 'fit' ? null : Math.min(5, Math.max(0.25,
+        const next = action === 'fit' ? null : action === 'fill' ? 'fill' : Math.min(5, Math.max(0.25,
             Math.round((this.scale + (action === 'in' ? 0.25 : -0.25)) * 100) / 100));
         const x = (this.viewport.scrollLeft + this.viewport.clientWidth / 2) / this.scale;
         const y = (this.viewport.scrollTop + this.viewport.clientHeight / 2) / this.scale;
         this.zoom = next;
         this.onZoom?.(next);
         this.layout();
-        this.viewport.scrollLeft = next === null ? 0 : x * this.scale - this.viewport.clientWidth / 2;
-        this.viewport.scrollTop = next === null ? 0 : y * this.scale - this.viewport.clientHeight / 2;
+        this.viewport.scrollLeft = next === null || next === 'fill' ? 0 : x * this.scale - this.viewport.clientWidth / 2;
+        if (next !== 'fill') this.viewport.scrollTop = next === null ? 0 : y * this.scale - this.viewport.clientHeight / 2;
+        this.schedule();
+    }
+
+    setOcrPage(result) {
+        if (this.ocrPage === result) return;
+        this.ocrPage = result;
+        this.selection?.setOcrPage(result);
+    }
+
+    setReadingProgress(fraction) {
+        this.viewport.scrollTop = Math.max(0, Math.min(1, fraction)) *
+            Math.max(0, this.viewport.scrollHeight - this.viewport.clientHeight);
         this.schedule();
     }
 
@@ -177,8 +202,11 @@ window.PdfPageViewer = class PdfPageViewer {
         const width = this.viewport.clientWidth;
         const height = this.viewport.clientHeight;
         if (!this.page || !width || !height) return false;
-        const scale = this.zoom ?? Math.min(width / this.base.width, height / this.base.height);
+        const scale = this.zoom === 'fill' ? width / this.base.width
+            : this.zoom ?? Math.min(width / this.base.width, height / this.base.height);
         const ratio = window.devicePixelRatio || 1;
+        const changed = this.scale !== scale || this.ratio !== ratio ||
+            this.layoutWidth !== width || this.layoutHeight !== height;
         if (this.scale !== scale || this.ratio !== ratio) {
             this.clearTiles();
             this.renderError = false;
@@ -189,9 +217,14 @@ window.PdfPageViewer = class PdfPageViewer {
             this.surface.style.height = this.pageViewport.height + 'px';
         }
         this.positionLinks();
-        this.output.textContent = Math.round(scale * 100) + '%' + (this.zoom === null ? ' · Sığdır' : '');
+        this.selection?.layout();
+        this.output.textContent = Math.round(scale * 100) + '%' +
+            (this.zoom === null ? ' · Sığdır' : this.zoom === 'fill' ? ' · Doldur' : '');
         this.minus.disabled = scale <= 0.25;
         this.plus.disabled = scale >= 5;
+        this.layoutWidth = width;
+        this.layoutHeight = height;
+        if (changed) this.onLayout?.();
         return true;
     }
 
@@ -361,6 +394,7 @@ window.PdfPageViewer = class PdfPageViewer {
         this.destroyed = true;
         cancelAnimationFrame(this.frame);
         this.clearTiles();
+        this.selection?.destroy();
         this.resizeObserver.disconnect();
         this.viewport.removeEventListener('scroll', this.schedule);
         window.removeEventListener('scroll', this.schedule, true);

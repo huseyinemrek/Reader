@@ -9,6 +9,98 @@ export function createPdfLayoutView({
     let suppressClickUntil = 0;
     let destroyed = false;
     const viewerSources = new WeakMap();
+    const document = root.ownerDocument;
+    const window = document.defaultView;
+    const bookViewport = root.closest('#book-viewport');
+    let readingFrame = 0;
+    let textScrolled = false;
+    let reflowing = false;
+    let lastWindowTop = window.scrollY;
+    let lastBookTop = bookViewport?.scrollTop || 0;
+    const observedText = new Map();
+
+    function readingViewport() {
+        if (getSettings().readingMode === 'paged') {
+            if (!bookViewport) return null;
+            const rect = bookViewport.getBoundingClientRect();
+            const top = Math.max(0, rect.top + bookViewport.clientTop);
+            const bottom = Math.min(window.innerHeight, rect.top + bookViewport.clientTop + bookViewport.clientHeight);
+            return {top, bottom, height: bottom - top};
+        }
+        return {top: 0, bottom: window.innerHeight, height: window.innerHeight};
+    }
+
+    function syncReading(section, state, fromScroll = false, force = false) {
+        const source = viewerSources.get(state);
+        if (!source || !state.viewer || state.viewer.destroyed || !section.isConnected ||
+            !root.contains(section) || (getSettings().readingMode === 'paged' &&
+            Number(section.dataset.pageIndex) !== getCurrentPage())) return;
+        const viewport = readingViewport();
+        const text = section.querySelector('.pdf-page-text');
+        if (!viewport || viewport.height <= 0 || !text) return;
+        const rect = text.getBoundingClientRect();
+        if (rect.height <= 0 || rect.bottom <= viewport.top || rect.top >= viewport.bottom) return;
+        if (fromScroll) source.manual = false;
+        if (source.manual) return;
+        const range = Math.max(0, rect.height - viewport.height);
+        const fraction = range ? Math.max(0, Math.min(1, (viewport.top - rect.top) / range)) : 0;
+        if (force || fromScroll || source.progress !== fraction) {
+            source.progress = fraction;
+            state.viewer.setReadingProgress?.(fraction);
+        }
+    }
+
+    function scheduleReading(fromScroll = false) {
+        if (destroyed || drag) return;
+        textScrolled ||= fromScroll;
+        if (readingFrame) return;
+        readingFrame = window.requestAnimationFrame(() => {
+            readingFrame = 0;
+            const fromScroll = textScrolled;
+            textScrolled = false;
+            if (!destroyed && !drag) {
+                for (const [section, state] of getStates()) syncReading(section, state, fromScroll);
+            }
+            reflowing = false;
+        });
+    }
+
+    function windowScroll(event) {
+        if (event.target !== document && event.target !== window) return;
+        const top = window.scrollY;
+        const changed = top !== lastWindowTop;
+        lastWindowTop = top;
+        if (changed && getSettings().readingMode !== 'paged') scheduleReading(!reflowing);
+    }
+
+    function bookScroll(event) {
+        if (event.target !== bookViewport) return;
+        const top = bookViewport.scrollTop;
+        const changed = top !== lastBookTop;
+        lastBookTop = top;
+        if (changed && getSettings().readingMode === 'paged') scheduleReading(!reflowing);
+    }
+
+    function sourceInteraction(event) {
+        if (event.type === 'keydown' && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
+        const original = event.target.closest?.('.pdf-original-viewport');
+        if (!original) return;
+        const state = getStates().get(original.closest('.pdf-page'));
+        const source = state && viewerSources.get(state);
+        if (source) {
+            source.manual = true;
+            textScrolled = false;
+        }
+    }
+
+    function reflow() {
+        reflowing = true;
+        scheduleReading();
+    }
+
+    const resizeObserver = new window.ResizeObserver(reflow);
+    resizeObserver.observe(root);
+    if (bookViewport) resizeObserver.observe(bookViewport);
 
     function splitBounds(columns) {
         const columnWidth = columns.clientWidth;
@@ -39,6 +131,7 @@ export function createPdfLayoutView({
         suppressClickUntil = performance.now() + 350;
         if (getSettings().pdfTextRatio !== active.startRatio) onSettingsChange?.();
         notify('drag-end');
+        reflow();
     }
 
     function dispose(section, state) {
@@ -46,6 +139,9 @@ export function createPdfLayoutView({
         state.viewer?.destroy();
         state.viewer = null;
         viewerSources.delete(state);
+        const text = observedText.get(section);
+        if (text) resizeObserver.unobserve(text);
+        observedText.delete(section);
         section.querySelector('.pdf-page-image-column')?.replaceChildren();
     }
 
@@ -57,6 +153,13 @@ export function createPdfLayoutView({
             return;
         }
         const bounds = splitBounds(columns);
+        const text = section.querySelector('.pdf-page-text');
+        if (text && observedText.get(section) !== text) {
+            const previous = observedText.get(section);
+            if (previous) resizeObserver.unobserve(previous);
+            observedText.set(section, text);
+            resizeObserver.observe(text);
+        }
         const textRatio = Math.max(bounds.minimum, Math.min(bounds.maximum, current.pdfTextRatio));
         const leftRatio = current.pdfLayout === 'text-left' ? textRatio : 1 - textRatio;
         columns.style.setProperty('--pdf-left-fr', leftRatio + 'fr');
@@ -78,22 +181,30 @@ export function createPdfLayoutView({
         }
         if (!wanted) return;
         if (!state.viewer) {
+            const source = {document: pdfDocument, page: pageNumber, progress: null, manual: false};
+            viewerSources.set(state, source);
             state.viewer = new window.PdfPageViewer(column, pdfDocument, pageNumber, {
                 zoom, onZoom: value => {
                     zoom = value;
                     notify('zoom');
                 }, onNavigate,
+                onLayout: () => {
+                    if (!destroyed && !drag && viewerSources.get(state) === source) syncReading(section, state, false, true);
+                },
                 textSource: section.dataset.textSource
             });
-            viewerSources.set(state, {document: pdfDocument, page: pageNumber});
+            syncReading(section, state);
         } else {
             state.viewer.setSource?.(section.dataset.textSource);
             state.viewer.schedule();
         }
+        state.viewer.setOcrPage?.(state.ocrPage || null);
+        scheduleReading();
     }
 
     function apply() {
         if (destroyed) return;
+        reflow();
         const current = settings();
         if (drag && (current.pdfLayout === 'text-only' || !drag.splitter.isConnected ||
             (current.readingMode === 'paged' && Number(drag.splitter.closest('.pdf-page').dataset.pageIndex) !== getCurrentPage()))) finishDrag();
@@ -179,10 +290,22 @@ export function createPdfLayoutView({
     ];
     for (const [name, handler] of listeners) root.addEventListener(name, handler, true);
     root.ownerDocument.defaultView.addEventListener('blur', finishDrag);
+    root.addEventListener('pointerdown', sourceInteraction, true);
+    root.addEventListener('wheel', sourceInteraction, {capture: true, passive: true});
+    root.addEventListener('keydown', sourceInteraction, true);
+    window.addEventListener('scroll', windowScroll, {passive: true});
+    window.addEventListener('resize', reflow);
+    bookViewport?.addEventListener('scroll', bookScroll, {passive: true});
 
     function reset() {
         finishDrag();
         for (const [section, state] of getStates()) dispose(section, state);
+        if (readingFrame) window.cancelAnimationFrame(readingFrame);
+        readingFrame = 0;
+        textScrolled = false;
+        reflowing = false;
+        lastWindowTop = window.scrollY;
+        lastBookTop = bookViewport?.scrollTop || 0;
         zoom = null;
         suppressClickUntil = 0;
     }
@@ -193,6 +316,13 @@ export function createPdfLayoutView({
         destroyed = true;
         for (const [name, handler] of listeners) root.removeEventListener(name, handler, true);
         root.ownerDocument.defaultView.removeEventListener('blur', finishDrag);
+        resizeObserver.disconnect();
+        root.removeEventListener('pointerdown', sourceInteraction, true);
+        root.removeEventListener('wheel', sourceInteraction, true);
+        root.removeEventListener('keydown', sourceInteraction, true);
+        window.removeEventListener('scroll', windowScroll);
+        window.removeEventListener('resize', reflow);
+        bookViewport?.removeEventListener('scroll', bookScroll);
     }
 
     return {apply, sync, dispose, finishDrag, reset, destroy, get isDragging() { return !!drag; }};
