@@ -12,7 +12,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
-const { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub } = require('./helpers/reader-fixtures.cjs');
+const { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub, makeImageGapEpub } = require('./helpers/reader-fixtures.cjs');
 const { startHosting, configureHosting, seedHosting, hostingLibrary } = require('./helpers/reader-hosting.cjs');
 const root = path.resolve(__dirname, '..');
 const requireLocal = createRequire(path.join(root, 'local/package.json'));
@@ -23,6 +23,7 @@ let epubFixture;
 let pdfGraphicsFixture;
 let htmlFixture;
 let illustratedEpubFixture;
+let imageGapEpubFixture;
 let uploadFixtures;
 
 before(async () => {
@@ -31,6 +32,7 @@ before(async () => {
     pdfGraphicsFixture = await makePdfGraphics(fixtureDirectory);
     htmlFixture = await makeHtmlz(fixtureDirectory);
     illustratedEpubFixture = await makeIllustratedEpub(fixtureDirectory);
+    imageGapEpubFixture = await makeImageGapEpub(fixtureDirectory);
     uploadFixtures = await Promise.all([
         makeEpub(fixtureDirectory, 'First background journey'),
         makeEpub(fixtureDirectory, 'Second background journey')
@@ -98,6 +100,10 @@ async function startReader(mode, t) {
     await fs.copyFile(illustratedEpubFixture.file, path.join(data, 'uploads', portraitsName));
     books.push({ id: 'book_test_portraits', title: illustratedEpubFixture.title, fileName: portraitsName,
         userId: 'local_user', bookUrl: '/uploads/' + portraitsName, coverUrl: null, toc: [] });
+    const gapsName = 'book_test_image_gaps_generated.epub';
+    await fs.copyFile(imageGapEpubFixture.file, path.join(data, 'uploads', gapsName));
+    books.push({ id: 'book_test_image_gaps', title: imageGapEpubFixture.title, fileName: gapsName,
+        userId: 'local_user', bookUrl: '/uploads/' + gapsName, coverUrl: null, toc: [] });
     await fs.writeFile(path.join(data, 'library.json'), JSON.stringify(books));
     const port = await availablePort();
     const base = `http://127.0.0.1:${port}`;
@@ -328,7 +334,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 }));
             }
         });
-        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture, htmlFixture, illustratedEpubFixture);
+        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture, htmlFixture, illustratedEpubFixture, imageGapEpubFixture);
 
         await t.test('mixed faces preserve word-level emphasis and relative sizes', async () => {
             await openPdf(page, base);
@@ -682,7 +688,9 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 for (const height of [1114, 640]) {
                     await page.setViewport({ width: 1664, height });
                     await page.goto(`${base}/book/book_test_portraits?page=1&ch=0&local=0`, { waitUntil: 'domcontentloaded' });
-                    assert.equal(await waitForPages(page), 5, 'The page map contains four illustrated columns and the final chapter');
+                    const fitted = height === 1114;
+                    const total = await waitForPages(page);
+                    assert.equal(total, fitted ? 4 : 5, 'A short caption shares the portrait page when modest resizing suffices');
                     const geometry = await page.evaluate(() => {
                         const viewport = document.getElementById('book-viewport');
                         const column = rect => Math.round((rect.left - viewport.getBoundingClientRect().left + viewport.scrollLeft - 80) / viewport.clientWidth);
@@ -695,29 +703,41 @@ for (const mode of ['local', 'vps', 'hosting']) {
                             caption: document.getElementById('caption-one').textContent
                         };
                     });
-                    assert.deepEqual(geometry.imageColumns, [[0], [2]], 'Each portrait must occupy one real column, without empty container fragments');
-                    assert.deepEqual(geometry.captionColumns, [[1], [3]], 'A short caption must not be split across nearly empty pages');
-                    assert.deepEqual(geometry.creditColumns, [[1], [3]], 'Each credit stays with its own caption');
-                    assert.equal(geometry.afterColumn, 3, 'Ordinary prose fills the remaining caption page');
+                    assert.deepEqual(geometry.imageColumns, [[0], [fitted ? 1 : 2]], 'Each portrait must occupy one real column, without empty container fragments');
+                    assert.deepEqual(geometry.captionColumns, [[fitted ? 0 : 1], [fitted ? 2 : 3]], 'A short caption must not be split across nearly empty pages');
+                    assert.deepEqual(geometry.creditColumns, geometry.captionColumns, 'Each credit stays with its own caption');
+                    assert.equal(geometry.afterColumn, fitted ? 2 : 3, 'Ordinary prose fills the remaining caption page');
                     assert.equal(geometry.caption, illustratedEpubFixture.caption);
-                    for (const [number, alt] of [[1, 'First portrait'], [3, 'Second portrait']]) {
+                    for (const [number, alt] of [[1, 'First portrait'], [fitted ? 2 : 3, 'Second portrait']]) {
                         if (number !== 1) await jumpTo(page, number);
-                        await page.waitForFunction(alt => document.querySelector(`img[alt="${alt}"]`)?.dataset.assetLoaded === 'true', {}, alt);
+                        await page.waitForFunction(number => {
+                            const viewport = document.getElementById('book-viewport');
+                            return Math.abs(viewport.scrollLeft - (number - 1) * viewport.clientWidth) < 1;
+                        }, {}, number);
+                        await page.waitForFunction(alt => {
+                            const image = document.querySelector(`img[alt="${alt}"]`);
+                            return image?.dataset.assetLoaded === 'true' && image.complete && image.naturalWidth === 800;
+                        }, {}, alt);
                         const bounds = await page.$eval(`img[alt="${alt}"]`, image => {
                             const rect = image.getBoundingClientRect();
                             return { top: rect.top, bottom: rect.bottom, height: innerHeight };
                         });
                         assert.ok(bounds.top >= 0 && bounds.bottom <= bounds.height, 'The entire portrait fits on screen');
                         const image = await page.$(`img[alt="${alt}"]`);
+                        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
                         const box = await image.boundingBox();
-                        const pixels = await page.screenshot({ clip: { x: Math.floor(box.x + box.width / 2),
-                            y: Math.floor(box.y + box.height * .96), width: 1, height: 1 } });
+                        const pixels = await page.screenshot({ captureBeyondViewport: false });
+                        if (number === 1 && fitted && process.env.READER_TEST_SCREENSHOT_DIR) {
+                            await fs.mkdir(process.env.READER_TEST_SCREENSHOT_DIR, { recursive: true });
+                            await fs.writeFile(path.join(process.env.READER_TEST_SCREENSHOT_DIR, `${mode}-portrait-with-text.png`), pixels);
+                        }
                         const canvas = createCanvas(1, 1);
                         const context = canvas.getContext('2d');
-                        context.drawImage(await loadImage(pixels), 0, 0);
-                        assert.deepEqual([...context.getImageData(0, 0, 1, 1).data], [32, 200, 64, 255], 'The portrait bottom is actually drawn, not cropped');
+                        context.drawImage(await loadImage(pixels), Math.floor(box.x + box.width / 2),
+                            Math.floor(box.y + box.height * .96), 1, 1, 0, 0, 1, 1);
+                        assert.deepEqual([...context.getImageData(0, 0, 1, 1).data], [32, 200, 64, 255], `The ${alt} bottom is actually drawn, not cropped: ${JSON.stringify(box)}`);
                     }
-                    await jumpTo(page, 2);
+                    await jumpTo(page, fitted ? 1 : 2);
                     assert.equal(await page.$eval('#caption-one', paragraph => paragraph.getClientRects().length), 1);
                     assert.equal(await page.evaluate(() => {
                         const viewport = document.getElementById('book-viewport').getBoundingClientRect();
@@ -726,9 +746,9 @@ for (const mode of ['local', 'vps', 'hosting']) {
                         return [...range.getClientRects()].every(rect => rect.left >= viewport.left && rect.right <= viewport.right &&
                             rect.top >= viewport.top && rect.bottom <= viewport.bottom);
                     }), true, 'Every caption line is visible on the same reading page');
-                    await jumpTo(page, 5);
+                    await jumpTo(page, total);
                     assert.match(await page.$eval('.epub-chapter', chapter => chapter.textContent), /final chapter remains reachable/);
-                    await jumpTo(page, 2);
+                    await jumpTo(page, fitted ? 1 : 2);
                     await openSidebar(page, 'settings');
                     await page.click('#mode-scroll-btn');
                     await page.click('#settings-close');
@@ -741,6 +761,104 @@ for (const mode of ['local', 'vps', 'hosting']) {
                     await waitForPages(page);
                 }
             } finally {
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+                await page.setViewport({ width: 1400, height: 960 });
+            }
+        });
+
+        await t.test('ordinary image intervals fit, cache and reflow without shrinking long or already packed prose', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const observerScript = await page.evaluateOnNewDocument(() => {
+                window.imageGapProbes = 0;
+                new MutationObserver(records => {
+                    window.imageGapProbes += records.filter(record => record.oldValue === null).length;
+                }).observe(document, { subtree: true, attributes: true, attributeOldValue: true,
+                    attributeFilter: ['data-reader-gap-measuring'] });
+            });
+            const geometry = () => {
+                const root = document.getElementById('book-content');
+                const css = getComputedStyle(root);
+                const stride = parseFloat(css.columnWidth) + parseFloat(css.columnGap);
+                const origin = root.getBoundingClientRect().left + parseFloat(css.paddingLeft);
+                const column = element => Math.floor((element.getBoundingClientRect().left - origin + .5) / stride);
+                const first = document.getElementById('gap-first'), second = document.getElementById('gap-second');
+                const prose = document.getElementById('gap-prose');
+                return { columns: [first, prose, second].map(column), firstHeight: first.getBoundingClientRect().height,
+                    secondHeight: second.getBoundingClientRect().height, prose: prose.textContent,
+                    order: [...prose.parentElement.children].map(element => element.id),
+                    fitted: second.hasAttribute('data-reader-gap-height'),
+                    proseBottom: prose.getBoundingClientRect().bottom, imageTop: second.getBoundingClientRect().top };
+            };
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    readingMode: 'paged', fontFamily: 'Arial', fontSize: 19, lineHeight: 1.5,
+                    maxWidth: 900, sidePadding: 80, paragraphSpacing: .9
+                })));
+                await page.setViewport({ width: 1664, height: 1114 });
+                const url = `${base}/book/book_test_image_gaps?page=1&ch=0&local=0`;
+                await page.goto(url, { waitUntil: 'domcontentloaded' });
+                const total = await waitForPages(page);
+                const cold = await page.evaluate(geometry);
+                assert.deepEqual(cold.columns, [0, 1, 1], 'Ordinary prose shares the next image when that needs less resizing');
+                assert.equal(cold.fitted, true);
+                assert.equal(cold.firstHeight, 964);
+                assert.ok(cold.secondHeight < 850 && cold.secondHeight >= 850 * .75);
+                assert.equal(cold.prose, imageGapEpubFixture.prose);
+                assert.deepEqual(cold.order, ['gap-first', 'gap-prose', 'gap-second'], 'Source order and parent CSS relationships are unchanged');
+                assert.ok(cold.proseBottom <= cold.imageTop, 'The following image stays below the prose');
+                assert.equal(await page.evaluate(() => window.imageGapProbes), 1, 'A cold chapter needs one batched flow probe');
+                const cache = await page.evaluate(() => JSON.parse(localStorage.getItem('edgeReaderPages:book_test_image_gaps')));
+                assert.equal(cache.counts[0], 2);
+                assert.equal(cache.imagePlans[0][0].side, 'before');
+                assert.deepEqual(cache.imagePlans[1], [], 'Long and already packed intervals keep their original image sizes');
+                await jumpTo(page, 2);
+                assert.equal(await page.$eval('#gap-prose', element => {
+                    const bounds = document.getElementById('book-viewport').getBoundingClientRect();
+                    const range = document.createRange(); range.selectNodeContents(element);
+                    return [...range.getClientRects()].every(rect => rect.left >= bounds.left && rect.right <= bounds.right &&
+                        rect.top >= bounds.top && rect.bottom <= bounds.bottom);
+                }), true, 'The full ordinary passage is visible on the fitted reading page');
+                if (process.env.READER_TEST_SCREENSHOT_DIR) {
+                    await fs.mkdir(process.env.READER_TEST_SCREENSHOT_DIR, { recursive: true });
+                    await page.screenshot({ path: path.join(process.env.READER_TEST_SCREENSHOT_DIR, `${mode}-ordinary-image-interval.png`),
+                        captureBeyondViewport: false });
+                }
+                assert.equal(await page.evaluate(() => window.imageGapProbes), 1, 'Page turning performs no extra flow measurement');
+                await page.goto(url, { waitUntil: 'domcontentloaded' });
+                assert.equal(await waitForPages(page), total);
+                assert.deepEqual(await page.evaluate(geometry), cold, 'Cached counts and visible image placement agree');
+                assert.equal(await page.evaluate(() => window.imageGapProbes), 0, 'Reopening uses the persistent plan without a flow probe');
+                await jumpTo(page, cache.counts[0] + 1);
+                assert.equal(await page.$eval('#long-prose', paragraph => paragraph.textContent), imageGapEpubFixture.longProse);
+                assert.equal(await page.$eval('.epub-chapter', section => section.querySelectorAll('[data-reader-gap-height]').length), 0);
+                assert.equal(await page.evaluate(() => {
+                    const root = document.getElementById('book-content'), css = getComputedStyle(root);
+                    const origin = root.getBoundingClientRect().left + parseFloat(css.paddingLeft);
+                    const stride = parseFloat(css.columnWidth) + parseFloat(css.columnGap);
+                    const column = id => Math.floor((document.getElementById(id).getBoundingClientRect().left - origin + .5) / stride);
+                    return [column('long-second'), column('already-next')].includes(column('already-prose'));
+                }), true, 'Already packed prose remains with an adjacent image');
+                await jumpTo(page, 1);
+                await page.setViewport({ width: 1664, height: 640 });
+                await page.waitForFunction(key => {
+                    const cache = JSON.parse(localStorage.getItem('edgeReaderPages:book_test_image_gaps'));
+                    return cache?.key !== key && !document.getElementById('page-jump-input').disabled;
+                }, {}, cache.key);
+                await waitForPages(page);
+                const resized = await page.evaluate(geometry);
+                assert.equal(resized.fitted, false, 'A passage exceeding the sparse-text budget is not squeezed beside an image');
+                assert.equal(resized.prose, cold.prose);
+                assert.notEqual(resized.columns[1], resized.columns[0]);
+                assert.notEqual(resized.columns[1], resized.columns[2]);
+                await openSidebar(page, 'settings');
+                await page.click('#mode-scroll-btn');
+                await page.click('#settings-close');
+                await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+                assert.equal(await page.$eval('#gap-prose', paragraph => paragraph.textContent), cold.prose);
+                assert.equal(await page.$eval('#gap-second', image => getComputedStyle(image).display), 'inline', 'Scroll mode retains the source flow');
+            } finally {
+                await page.removeScriptToEvaluateOnNewDocument(observerScript.identifier);
                 await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
                 await page.setViewport({ width: 1400, height: 960 });
             }

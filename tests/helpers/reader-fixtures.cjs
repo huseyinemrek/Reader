@@ -111,8 +111,8 @@ async function makePdfGraphics(directory) {
     return { file, title, bytes };
 }
 
-async function makeIllustratedEpub(directory) {
-    const fixture = await makeEpub(directory, 'Generated portrait pagination');
+async function makeIllustratedEpub(directory, title = 'Generated portrait pagination') {
+    const fixture = await makeEpub(directory, title);
     const zip = await JSZip.loadAsync(fixture.bytes);
     const canvas = createCanvas(800, 1200);
     const context = canvas.getContext('2d');
@@ -141,6 +141,28 @@ async function makeIllustratedEpub(directory) {
     return { ...fixture, caption };
 }
 
+async function makeImageGapEpub(directory) {
+    const fixture = await makeIllustratedEpub(directory, 'Generated ordinary image intervals');
+    const zip = await JSZip.loadAsync(fixture.bytes);
+    const prose = 'Ordinary reading between two pictures. This passage is part of the story rather than a caption or picture credit. The traveller pauses to remember the people met along the road, the conversations they shared, and the choices that led them here. Every word must remain in its original order, readable at the chosen font size, while the next picture keeps its complete proportions. The journey continues through the valley towards a village at the edge of the forest.';
+    const longProse = Array.from({ length: 6 }, (_, index) => `Long passage ${index + 1}. ${prose}`).join(' ');
+    zip.file('OEBPS/first.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml"><body><section>
+        <img id="gap-first" alt="Gap first portrait" src="images/first.png"/>
+        <p id="gap-prose"><span>${prose}</span></p>
+        <img id="gap-second" alt="Gap second portrait" src="images/first.png" style="max-height:calc(100vh - 264px)"/>
+        </section></body></html>`);
+    zip.file('OEBPS/later.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml"><body><section>
+        <img id="long-first" alt="Long first portrait" src="images/first.png"/>
+        <p id="long-prose">${longProse}</p>
+        <img id="long-second" alt="Long second portrait" src="images/first.png"/>
+        <p id="already-prose">This sentence already shares a page with the following picture.</p>
+        <img id="already-next" alt="Already fitting portrait" src="images/first.png" style="max-height:calc(100vh - 264px)"/>
+        </section></body></html>`);
+    fixture.bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    await fs.writeFile(fixture.file, fixture.bytes);
+    return { ...fixture, prose, longProse };
+}
+
 async function makeHtmlz(directory) {
     const title = 'Generated HTML link journey';
     const zip = new JSZip();
@@ -152,4 +174,4 @@ async function makeHtmlz(directory) {
     return { title, file, bytes };
 }
 
-module.exports = { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub };
+module.exports = { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub, makeImageGapEpub };

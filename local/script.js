@@ -1,4 +1,4 @@
-import { RESOURCE_BASE, hydrateVisibleAssets, normalizeInlineStyle } from '/reader-core/cloud-reader.js';
+import { RESOURCE_BASE, hydrateVisibleAssets, normalizeInlineStyle, createImageGapLayout } from '/reader-core/cloud-reader.js';
 import { createServerBookResources } from '/reader-core/server-reader.js';
 import { createUploadQueue, uploadHttp } from '/reader-core/upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from '/reader-core/pdf-outline.js';
@@ -211,6 +211,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let paginationAbort = new AbortController();
     let paginationPromise = Promise.resolve();
     let layoutKey = '';
+    let imageGapLayout = createImageGapLayout();
     let layoutTimer = null;
     let layoutPosition = null;
     let resourceBase = '';
@@ -944,6 +945,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         totalBookPages = totalPdfPages = 0;
         isNavigatingPage = scrollWindowBusy = false;
         layoutKey = '';
+        imageGapLayout = createImageGapLayout();
         layoutPosition = null;
     }
 
@@ -963,7 +965,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function getLayoutKey() {
         const s = currentSettings;
-        return JSON.stringify([6, innerWidth, innerHeight, devicePixelRatio,
+        return JSON.stringify([7, innerWidth, innerHeight, devicePixelRatio,
             s.fontSize, s.fontFamily, s.lineHeight, s.maxWidth, s.sidePadding, s.paragraphSpacing,
             bookResources?.sourceVersion]);
     }
@@ -1121,7 +1123,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     window.addEventListener('pagehide', flushProgress);
 
-    async function settleContent(article) {
+    async function settleContent(article, key = null) {
+        const gapLayout = imageGapLayout;
         const loaded = image => image.complete ? Promise.resolve() : new Promise(resolve => {
             image.addEventListener('load', resolve, {once: true});
             image.addEventListener('error', resolve, {once: true});
@@ -1139,6 +1142,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Request fonts used by this chapter before waiting for their metrics.
         article.getBoundingClientRect();
         await article.ownerDocument.fonts.ready;
+        gapLayout.fit(article, key || getLayoutKey());
         return article.scrollWidth;
     }
 
@@ -1160,7 +1164,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const cache = JSON.parse(localStorage.getItem(cacheKey));
                 if (cache && cache.key === key && cache.file === book.fileName && cache.counts.length === epubSpine.length &&
-                    cache.counts.every(n => Number.isSafeInteger(n) && n >= 0)) {
+                    cache.counts.every(n => Number.isSafeInteger(n) && n >= 0) &&
+                    cache.imagePlans?.length === epubSpine.length &&
+                    imageGapLayout.restore(key, cache.imagePlans)) {
                     commitPageMap(cache.counts);
                     updatePagedIndicator();
                     return;
@@ -1214,7 +1220,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 signal.throwIfAborted();
                 article.replaceChildren(section);
                 viewport.scrollLeft = 0;
-                await settleContent(article);
+                await settleContent(article, key);
                 signal.throwIfAborted();
                 counts.push(Math.max(1, Math.round(viewport.scrollWidth / viewport.clientWidth)));
                 article.replaceChildren();
@@ -1225,7 +1231,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (token !== session || key !== getLayoutKey()) return;
             if (currentBookType === 'epub') {
                 commitPageMap(counts);
-                try {localStorage.setItem(cacheKey, JSON.stringify({key, file: book.fileName, counts}));} catch (_) {}
+                try {localStorage.setItem(cacheKey, JSON.stringify({key, file: book.fileName, counts,
+                    imagePlans: imageGapLayout.serialize(key, length)}));} catch (_) {}
             } else totalBookPages = counts[0];
             updatePagedIndicator();
         } finally {
@@ -1585,6 +1592,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             let local = Math.max(0, Number(params.get('local') ?? saved?.localPage ?? 0) || 0);
             if (currentBookType === 'pdf') local = Math.max(0, Math.min(totalPdfPages - 1, (Number(params.get('page') ?? book.pageIndex) || 1) - 1));
             isNavigatingPage = true;
+            if (currentBookType === 'epub') {
+                try {
+                    const cache = JSON.parse(localStorage.getItem('edgeReaderPages:' + currentBookId));
+                    if (cache?.key === getLayoutKey() && cache.file === book.fileName && cache.imagePlans?.length === epubSpine.length) {
+                        imageGapLayout.restore(cache.key, cache.imagePlans);
+                    }
+                } catch (_) {}
+            }
             await showLocation(chapter, local, saved?.readingMode === 'scroll' ? saved.scrollRatio : null);
             if (token !== session) return;
             isNavigatingPage = false;
