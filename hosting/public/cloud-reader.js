@@ -4,6 +4,26 @@ import { readLayoutBundle, imageDimensions } from './layout-bundle.js';
 export const RESOURCE_BASE = 'https://epub.local/';
 const XLINK = 'http://www.w3.org/1999/xlink';
 
+// Shared by the visible chapter and page-counting document. Inline image margins,
+// baseline space and publisher padding can otherwise overflow a whole column.
+const pagedImageCss = `
+#reader-view.paged-mode #book-content .epub-chapter [data-reader-image-block] {
+    padding-block: 0 !important;
+    margin-block: 20px !important;
+    break-inside: avoid !important;
+}
+#reader-view.paged-mode #book-content .epub-chapter [data-reader-image-block] [data-reader-image-block] {
+    margin-block: 0 !important;
+}
+#reader-view.paged-mode #book-content .epub-chapter [data-reader-image-block] img {
+    display: block;
+    margin: 0 auto !important;
+}
+/* End a caption/credit keep-with-next chain before the next independent image. */
+#reader-view.paged-mode #book-content .epub-chapter :has(+ [data-reader-image-block]) {
+    break-after: auto !important;
+}`;
+
 export function storageErrorMessage(error) {
     if (error.code === 'storage/quota-exceeded') {
         return 'Cloud Storage bucket erişimi kota veya faturalandırma nedeniyle durdurulmuş. ' +
@@ -245,17 +265,21 @@ export async function createBookResources(book, { uid, signal, source = null }) 
                 }
             }
         }
+        for (const element of parsed.body.querySelectorAll('div,p,figure')) {
+            // Keep inline illustrations and figures containing captions in their
+            // source flow. Nested image-only wrappers share one outer spacing.
+            if (!element.textContent.trim() && element.querySelectorAll('img').length === 1 &&
+                !element.querySelector('svg,hr,table')) element.dataset.readerImageBlock = '';
+        }
         signal.throwIfAborted();
         const result = targetDocument.createElement('section');
         result.className = 'epub-chapter';
         result.id = id;
         result.dataset.index = chapterIndex;
         result.dataset.loaded = 'true';
-        if (css) {
-            const style = targetDocument.createElement('style');
-            style.textContent = css;
-            result.appendChild(style);
-        }
+        const style = targetDocument.createElement('style');
+        style.textContent = css + '\n' + pagedImageCss;
+        result.appendChild(style);
         while (parsed.body.firstChild) result.appendChild(targetDocument.adoptNode(parsed.body.firstChild));
         return result;
     }

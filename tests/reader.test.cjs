@@ -12,7 +12,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
-const { makeEpub, makePdfGraphics, makeHtmlz } = require('./helpers/reader-fixtures.cjs');
+const { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub } = require('./helpers/reader-fixtures.cjs');
 const { startHosting, configureHosting, seedHosting, hostingLibrary } = require('./helpers/reader-hosting.cjs');
 const root = path.resolve(__dirname, '..');
 const requireLocal = createRequire(path.join(root, 'local/package.json'));
@@ -22,6 +22,7 @@ let fixtureDirectory;
 let epubFixture;
 let pdfGraphicsFixture;
 let htmlFixture;
+let illustratedEpubFixture;
 let uploadFixtures;
 
 before(async () => {
@@ -29,6 +30,7 @@ before(async () => {
     epubFixture = await makeEpub(fixtureDirectory);
     pdfGraphicsFixture = await makePdfGraphics(fixtureDirectory);
     htmlFixture = await makeHtmlz(fixtureDirectory);
+    illustratedEpubFixture = await makeIllustratedEpub(fixtureDirectory);
     uploadFixtures = await Promise.all([
         makeEpub(fixtureDirectory, 'First background journey'),
         makeEpub(fixtureDirectory, 'Second background journey')
@@ -92,6 +94,10 @@ async function startReader(mode, t) {
     await fs.copyFile(htmlFixture.file, path.join(data, 'uploads', htmlName));
     books.push({ id: 'book_test_html', title: htmlFixture.title, fileName: htmlName,
         userId: 'local_user', bookUrl: '/uploads/' + htmlName, coverUrl: null, toc: [] });
+    const portraitsName = 'book_test_portraits_generated.epub';
+    await fs.copyFile(illustratedEpubFixture.file, path.join(data, 'uploads', portraitsName));
+    books.push({ id: 'book_test_portraits', title: illustratedEpubFixture.title, fileName: portraitsName,
+        userId: 'local_user', bookUrl: '/uploads/' + portraitsName, coverUrl: null, toc: [] });
     await fs.writeFile(path.join(data, 'library.json'), JSON.stringify(books));
     const port = await availablePort();
     const base = `http://127.0.0.1:${port}`;
@@ -178,6 +184,8 @@ async function waitForPages(page) {
 async function jumpTo(page, number) {
     await page.click('#paged-indicator');
     await page.waitForFunction(() => document.getElementById('page-jump-modal').open);
+    await page.waitForFunction(() => !document.querySelector('#page-jump-modal .modal-card')
+        .getAnimations().some(animation => animation.playState === 'running'));
     await page.$eval('#page-jump-input', (input, value) => { input.value = String(value); }, number);
     await page.click('#page-jump-submit');
     await page.waitForFunction(number => !document.getElementById('page-jump-modal').open &&
@@ -320,7 +328,7 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 }));
             }
         });
-        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture, htmlFixture);
+        if (runtime) await seedHosting(page, runtime, epubFixture, pdfGraphicsFixture, htmlFixture, illustratedEpubFixture);
 
         await t.test('mixed faces preserve word-level emphasis and relative sizes', async () => {
             await openPdf(page, base);
@@ -660,6 +668,81 @@ for (const mode of ['local', 'vps', 'hosting']) {
             } finally {
                 page.off('request', onRequest);
                 page.off('response', onResponse);
+            }
+        });
+
+        await t.test('portrait captions stay together without phantom or sparse image columns', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    readingMode: 'paged', fontFamily: 'Arial', fontSize: 19, lineHeight: 1.5,
+                    maxWidth: 900, sidePadding: 80, paragraphSpacing: .9
+                })));
+                for (const height of [1114, 640]) {
+                    await page.setViewport({ width: 1664, height });
+                    await page.goto(`${base}/book/book_test_portraits?page=1&ch=0&local=0`, { waitUntil: 'domcontentloaded' });
+                    assert.equal(await waitForPages(page), 5, 'The page map contains four illustrated columns and the final chapter');
+                    const geometry = await page.evaluate(() => {
+                        const viewport = document.getElementById('book-viewport');
+                        const column = rect => Math.round((rect.left - viewport.getBoundingClientRect().left + viewport.scrollLeft - 80) / viewport.clientWidth);
+                        const rects = id => [...document.getElementById(id).getClientRects()].filter(rect => rect.height > 1);
+                        return {
+                            imageColumns: ['portrait-one', 'portrait-two'].map(id => rects(id).map(column)),
+                            captionColumns: ['caption-one', 'caption-two'].map(id => rects(id).map(column)),
+                            creditColumns: ['credit-one', 'credit-two'].map(id => rects(id).map(column)),
+                            afterColumn: column(document.getElementById('after-portraits').getBoundingClientRect()),
+                            caption: document.getElementById('caption-one').textContent
+                        };
+                    });
+                    assert.deepEqual(geometry.imageColumns, [[0], [2]], 'Each portrait must occupy one real column, without empty container fragments');
+                    assert.deepEqual(geometry.captionColumns, [[1], [3]], 'A short caption must not be split across nearly empty pages');
+                    assert.deepEqual(geometry.creditColumns, [[1], [3]], 'Each credit stays with its own caption');
+                    assert.equal(geometry.afterColumn, 3, 'Ordinary prose fills the remaining caption page');
+                    assert.equal(geometry.caption, illustratedEpubFixture.caption);
+                    for (const [number, alt] of [[1, 'First portrait'], [3, 'Second portrait']]) {
+                        if (number !== 1) await jumpTo(page, number);
+                        await page.waitForFunction(alt => document.querySelector(`img[alt="${alt}"]`)?.dataset.assetLoaded === 'true', {}, alt);
+                        const bounds = await page.$eval(`img[alt="${alt}"]`, image => {
+                            const rect = image.getBoundingClientRect();
+                            return { top: rect.top, bottom: rect.bottom, height: innerHeight };
+                        });
+                        assert.ok(bounds.top >= 0 && bounds.bottom <= bounds.height, 'The entire portrait fits on screen');
+                        const image = await page.$(`img[alt="${alt}"]`);
+                        const box = await image.boundingBox();
+                        const pixels = await page.screenshot({ clip: { x: Math.floor(box.x + box.width / 2),
+                            y: Math.floor(box.y + box.height * .96), width: 1, height: 1 } });
+                        const canvas = createCanvas(1, 1);
+                        const context = canvas.getContext('2d');
+                        context.drawImage(await loadImage(pixels), 0, 0);
+                        assert.deepEqual([...context.getImageData(0, 0, 1, 1).data], [32, 200, 64, 255], 'The portrait bottom is actually drawn, not cropped');
+                    }
+                    await jumpTo(page, 2);
+                    assert.equal(await page.$eval('#caption-one', paragraph => paragraph.getClientRects().length), 1);
+                    assert.equal(await page.evaluate(() => {
+                        const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+                        const range = document.createRange();
+                        range.selectNodeContents(document.getElementById('caption-one'));
+                        return [...range.getClientRects()].every(rect => rect.left >= viewport.left && rect.right <= viewport.right &&
+                            rect.top >= viewport.top && rect.bottom <= viewport.bottom);
+                    }), true, 'Every caption line is visible on the same reading page');
+                    await jumpTo(page, 5);
+                    assert.match(await page.$eval('.epub-chapter', chapter => chapter.textContent), /final chapter remains reachable/);
+                    await jumpTo(page, 2);
+                    await openSidebar(page, 'settings');
+                    await page.click('#mode-scroll-btn');
+                    await page.click('#settings-close');
+                    await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+                    assert.equal(await page.$eval('#caption-one', paragraph => paragraph.textContent), illustratedEpubFixture.caption);
+                    assert.equal(await page.$eval('#portrait-one img', image => getComputedStyle(image).display), 'inline', 'The publisher scroll layout is preserved');
+                    await openSidebar(page, 'settings');
+                    await page.click('#mode-paged-btn');
+                    await page.click('#settings-close');
+                    await waitForPages(page);
+                }
+            } finally {
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+                await page.setViewport({ width: 1400, height: 960 });
             }
         });
 

@@ -111,6 +111,36 @@ async function makePdfGraphics(directory) {
     return { file, title, bytes };
 }
 
+async function makeIllustratedEpub(directory) {
+    const fixture = await makeEpub(directory, 'Generated portrait pagination');
+    const zip = await JSZip.loadAsync(fixture.bytes);
+    const canvas = createCanvas(800, 1200);
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#e82020';
+    context.fillRect(0, 0, 800, 1200);
+    context.fillStyle = '#20c840';
+    context.fillRect(0, 1100, 800, 100);
+    zip.file('OEBPS/images/first.png', canvas.toBuffer('image/png'));
+    const caption = 'An official portrait. Notice the long coat, stockings, high heels, graceful posture and a huge sword. In contemporary culture, all these except for the sword would be considered unusual. But in his time he was admired for his colourful clothing and splendid appearance.';
+    // Publisher keep-with-next chains + padded, inline portrait containers reproduce
+    // Chromium's sparse-column bug without depending on a copyrighted book.
+    zip.file('OEBPS/first.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml"><head><style>
+        .portrait {width:100%;margin:.5em auto;padding:.5em 0 .7em;text-align:center;break-inside:avoid}
+        .caption {margin:.5em 0 .2em;break-after:avoid;break-inside:avoid;font-size:.9em;font-weight:bold}
+        .credit {margin:.5em 0;break-after:avoid;break-inside:avoid;font-size:.9em;font-style:italic}
+        </style></head><body><section>
+        <div class="portrait" id="portrait-one"><img alt="First portrait" src="images/first.png"/></div>
+        <p class="caption" id="caption-one"><span>${caption}</span></p><p class="credit" id="credit-one">First picture credit.</p>
+        <div class="portrait" id="portrait-two"><div style="padding:1em"><a href="#after-portraits"><img alt="Second portrait" src="images/first.png"/></a></div></div>
+        <p class="caption" id="caption-two">A second portrait showing a different style.</p><p class="credit" id="credit-two">Second picture credit.</p>
+        <p id="after-portraits">Ordinary reading continues after both portraits and their complete captions.</p>
+        </section></body></html>`);
+    zip.file('OEBPS/later.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>The final chapter remains reachable.</p></body></html>');
+    fixture.bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    await fs.writeFile(fixture.file, fixture.bytes);
+    return { ...fixture, caption };
+}
+
 async function makeHtmlz(directory) {
     const title = 'Generated HTML link journey';
     const zip = new JSZip();
@@ -122,4 +152,4 @@ async function makeHtmlz(directory) {
     return { title, file, bytes };
 }
 
-module.exports = { makeEpub, makePdfGraphics, makeHtmlz };
+module.exports = { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub };

@@ -66,6 +66,8 @@ EPUB içindeki görsel, SVG bağlantısı, CSS arka planı ve font yolu kendi b�
 
 Yeni EPUB/HTMLZ yüklemesi arka plan üretimini başlatır; eski diskteki kitap için ilk açılış başlatır. Tek Node worker’ı bölüm metinlerini, CSS’yi ve görsel boyutlarını işler; HTTP olay döngüsü paketin üretilmesini beklemez. Paket görsel/font dosyalarının asıl byte’larını içermez. Tarayıcı bütün bölüm metinlerini mevcut düzenle ölçer; yalnız okunan alandaki EPUB görsellerini yükler. Sayfa sayısı basılı kitap numarası değildir; ekran veya font ölçüleri değişince yeniden hesaplanır.
 
+Sayfalı EPUB/HTMLZ düzeninde yalnız görsel içeren kapsayıcıların dikey boşluğu tek yerde uygulanır; büyük görselin kapsayıcısı boş ek sayfalara taşmaz. Açıklama/telif satırını sonraki bağımsız görsele bağlayan kural kaldırılır; kısa açıklama gereksiz yere parçalanmaz. Kaydırmalı düzen korunur. Ortak `cloud-reader.js` aynı kuralları sayfa ölçümünde de uygular; eski tarayıcı sayfa haritası yeni düzen anahtarıyla yeniden hesaplanır, kitabı tekrar yüklemek gerekmez. Local, VPS ve Hosting’de aynıdır.
+
 Kimlik doğrulamalı `GET /api/books/:id/layout`, hazırlanırken `202 {status:'pending'|'processing',sourceVersion}`, hazırken `200` ZIP ve `X-Reader-Source-Version`, üretim başarısızsa `422 {status:'failed',sourceVersion,error}` döndürür. Dosya/üretici sürümü değişmedikçe başarısız arşiv kendiliğinden tekrar işlenmez. Hazır paket `DATA_DIR/layout-cache/<bookId>/<sourceVersion>/` altında yeniden başlatmada kullanılır; kaynak değişikliği ve kitap silme ilgili cache’i iptal eder. Bu dizin kişisel veridir ve Git’e dahil edilmez.
 
 ### Sekmelik yükleme kuyruğu

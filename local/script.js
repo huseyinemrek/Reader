@@ -963,7 +963,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function getLayoutKey() {
         const s = currentSettings;
-        return JSON.stringify([5, innerWidth, innerHeight, devicePixelRatio,
+        return JSON.stringify([6, innerWidth, innerHeight, devicePixelRatio,
             s.fontSize, s.fontFamily, s.lineHeight, s.maxWidth, s.sidePadding, s.paragraphSpacing,
             bookResources?.sourceVersion]);
     }
