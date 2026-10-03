@@ -205,7 +205,10 @@ async function seedHosting(page, runtime, epub, pdfGraphics, html, illustratedEp
                 id: fixture.id, title: fixture.title || fixture.name, fileName: fixture.id + '_' + fixture.name,
                 bookUrl: await getDownloadURL(bookRef), storagePath, layoutUrl, layoutStoragePath,
                 coverUrl: null, addedAt: Date.now(), progress: 0,
-                toc: [{ title: 'Stale library bookmark', link: '#unrelated' }]
+                toc: fixture.id === 'book_test_epub'
+                    ? [{title: 'First journey', link: '#chapter-OEBPS/first.xhtml'},
+                        {title: 'Later journey', link: '#chapter-OEBPS/later.xhtml'}]
+                    : [{ title: 'Stale library bookmark', link: '#unrelated' }]
             });
         }
     }, fixtures);

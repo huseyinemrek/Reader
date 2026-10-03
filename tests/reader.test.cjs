@@ -41,7 +41,13 @@ before(async () => {
     ]);
     const { default: puppeteer } = await import(pathToFileURL(requireLocal.resolve('puppeteer')).href);
     // Cold navigations must release old emulator RPCs, not freeze them in BFCache.
-    browser = await puppeteer.launch({ headless: true, args: ['--disable-features=BackForwardCache'] });
+    browser = await puppeteer.launch({
+        executablePath: process.env.READER_TEST_BROWSER_EXECUTABLE || undefined,
+        headless: true,
+        // Windows Edge can exit its launcher before Puppeteer sees the relaunched process.
+        args: ['--disable-features=BackForwardCache',
+            ...(process.platform === 'win32' ? ['--edge-skip-compat-layer-relaunch'] : [])]
+    });
 });
 after(async () => {
     try { await browser?.close(); }
@@ -89,7 +95,9 @@ async function startReader(mode, t) {
     const epubName = 'book_test_epub_generated.epub';
     await fs.copyFile(epubFixture.file, path.join(data, 'uploads', epubName));
     books.push({ id: 'book_test_epub', title: epubFixture.title, fileName: epubName,
-        userId: 'local_user', bookUrl: '/uploads/' + epubName, coverUrl: null, toc: [] });
+        userId: 'local_user', bookUrl: '/uploads/' + epubName, coverUrl: null,
+        toc: [{title: 'First journey', link: '#chapter-OEBPS/first.xhtml'},
+            {title: 'Later journey', link: '#chapter-OEBPS/later.xhtml'}] });
     const graphicsName = 'book_test_pdf_graphics_generated.pdf';
     await fs.copyFile(pdfGraphicsFixture.file, path.join(data, 'uploads', graphicsName));
     books.push({ id: 'book_test_pdf_graphics', title: pdfGraphicsFixture.title, fileName: graphicsName,
@@ -149,7 +157,8 @@ async function openPdf(page, base, id = 'book_test_typography', number = 2) {
     await page.waitForFunction(number => {
         const section = document.querySelector('.pdf-page');
         return section?.dataset.pageIndex === String(number) &&
-            section.querySelector('.pdf-page-text')?.textContent.includes(`page ${number}.`);
+            section.querySelector('.pdf-page-text')?.textContent.includes(`page ${number}.`) &&
+            !document.getElementById('page-jump-input').disabled;
     }, { timeout: 20000 }, number);
 }
 
@@ -336,6 +345,192 @@ function pagedWordShown({ id, word }) {
         }
     }
     return false;
+}
+
+// Only replace the browser's speech service; the reader still creates native utterances,
+// chooses source ranges, follows them and persists positions through its normal UI.
+function installReaderSpeechDriver() {
+    const original = Object.getOwnPropertyDescriptor(window, 'speechSynthesis');
+    const driver = {
+        records: [], current: -1, speaking: false, paused: false,
+        getVoices: () => [],
+        speak(utterance) {
+            const record = { utterance, boundary: utterance.onboundary, end: utterance.onend, error: utterance.onerror };
+            this.records.push(record);
+            this.current = this.records.length - 1;
+            this.speaking = true;
+            this.paused = false;
+            queueMicrotask(() => {
+                if (this.records[this.current] === record && this.speaking)
+                    utterance.dispatchEvent(new SpeechSynthesisEvent('start', { utterance }));
+            });
+        },
+        cancel() { this.speaking = false; this.paused = false; },
+        pause() { this.paused = true; },
+        resume() { this.paused = false; },
+        addEventListener() {},
+        removeEventListener() {},
+        emit(type, charIndex = 0, index = this.current, late = false) {
+            const record = this.records[index];
+            if (!record) throw new Error('No utterance for speech event');
+            const event = type === 'error'
+                ? new SpeechSynthesisErrorEvent('error', { utterance: record.utterance, error: 'canceled' })
+                : new SpeechSynthesisEvent(type, { utterance: record.utterance, charIndex, name: 'word' });
+            if (!late && type !== 'boundary') this.speaking = false;
+            if (late) record[type]?.call(record.utterance, event);
+            else record.utterance.dispatchEvent(event);
+        },
+        restore() {
+            if (original) Object.defineProperty(window, 'speechSynthesis', original);
+            else delete window.speechSynthesis;
+            delete window.readerSpeechDriver;
+        }
+    };
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: driver });
+    window.readerSpeechDriver = driver;
+}
+
+function readerSpokenWord() {
+    const range = Array.from(CSS.highlights.get('reader-tts-word') || [])[0];
+    if (!range?.startContainer.isConnected) return null;
+    const block = range.startContainer.parentElement.closest('[id]');
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let word = 0;
+    for (let node; (node = walker.nextNode());) {
+        if (node.parentElement.closest('style, script, [data-reader-ui]')) continue;
+        for (const match of node.textContent.matchAll(/\S+/g)) {
+            if (node === range.startContainer && match.index + match[0].length > range.startOffset) {
+                const rect = range.getBoundingClientRect();
+                const bounds = document.getElementById('book-viewport').getBoundingClientRect();
+                const paged = document.getElementById('reader-view').classList.contains('paged-mode');
+                return { id: block.id, word, text: range.toString(),
+                    section: Number(range.startContainer.parentElement.closest('#book-content > section').dataset.index),
+                    shown: rect.width > 0 && rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 &&
+                        rect.top >= (paged ? bounds.top : 12) - 1 && rect.bottom <= (paged ? bounds.bottom : innerHeight) + 1 };
+            }
+            word++;
+        }
+    }
+    throw new Error('The spoken range is not a source word');
+}
+
+function rememberReaderSpeechDom() {
+    const range = Array.from(CSS.highlights.get('reader-tts-word') || [])[0];
+    const section = range.startContainer.parentElement.closest('#book-content > section');
+    const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    for (let node; (node = walker.nextNode());) nodes.push({ node, text: node.textContent });
+    window.readerSpeechDom = { section, nodes, utterance: window.readerSpeechDriver.current };
+}
+
+function readerSpeechDomIntact() {
+    const saved = window.readerSpeechDom;
+    const walker = document.createTreeWalker(saved.section, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    for (let node; (node = walker.nextNode());) nodes.push(node);
+    return saved.section.isConnected && nodes.length === saved.nodes.length &&
+        saved.nodes.every((entry, index) => entry.node === nodes[index] && entry.node.textContent === entry.text) &&
+        window.readerSpeechDriver.current === saved.utterance && window.readerSpeechDriver.speaking;
+}
+
+async function withReaderSpeech(page, base, run) {
+    await page.goto(base, { waitUntil: 'domcontentloaded' });
+    const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+    const viewport = page.viewport();
+    let script;
+    try {
+        script = await page.evaluateOnNewDocument(installReaderSpeechDriver);
+        await run();
+    } finally {
+        try {
+            await page.evaluate(() => {
+                document.getElementById('tts-close')?.click();
+                window.readerSpeechDriver?.restore();
+                delete window.readerSpeechDom;
+            });
+        } finally {
+            try {
+                if (script) await page.removeScriptToEvaluateOnNewDocument(script.identifier);
+            } finally {
+                try {
+                    await page.evaluate(settings => {
+                        if (settings === null) localStorage.removeItem('edgeReaderSettings');
+                        else localStorage.setItem('edgeReaderSettings', settings);
+                    }, settings);
+                } finally {
+                    await page.setViewport(viewport);
+                }
+            }
+        }
+    }
+}
+
+async function setSpeechReadingMode(page, readingMode) {
+    await page.evaluate(readingMode => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+        ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode
+    })), readingMode);
+}
+
+async function openReaderSpeech(page) {
+    await page.hover('#reader-nav-hit-area');
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('reader-nav')).visibility === 'visible');
+    await page.click('#tts-toggle');
+    await page.waitForFunction(() => document.getElementById('tts-player').classList.contains('active') &&
+        window.readerSpeechDriver.speaking && CSS.highlights.get('reader-tts-word')?.size);
+    await page.$eval('#tts-player', async card => {
+        await Promise.all(card.getAnimations().map(animation => animation.finished));
+    });
+}
+
+async function turnSpeechPage(page) {
+    const before = Number(new URL(page.url()).searchParams.get('page'));
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction(before => Number(new URL(location.href).searchParams.get('page')) === before + 1, {}, before);
+    await delay(250);
+}
+
+// Supply real word/end events, not elapsed-time guesses. Stop at the requested source
+// range so the assertions observe what the reader actually reveals, not driver state.
+async function advanceReaderSpeech(page, target) {
+    for (let attempt = 0; attempt < 250; attempt++) {
+        const reached = await page.evaluate(target => {
+            const driver = window.readerSpeechDriver;
+            const record = driver.records[driver.current];
+            if (!record || !driver.speaking) throw new Error('Speech stopped before reaching the source target');
+            const matches = Array.from(record.utterance.text.matchAll(/\S+/g));
+            nextBoundary: for (const match of matches) {
+                driver.emit('boundary', match.index);
+                const range = Array.from(CSS.highlights.get('reader-tts-word') || [])[0];
+                if (!range) continue;
+                const section = range.startContainer.parentElement.closest('#book-content > section');
+                if (target.section !== undefined && Number(section.dataset.index) === target.section) return true;
+                const block = range.startContainer.parentElement.closest('[id]');
+                if (block.id !== target.id) continue;
+                const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+                let word = 0;
+                for (let node; (node = walker.nextNode());) {
+                    if (node.parentElement.closest('style, script, [data-reader-ui]')) continue;
+                    for (const source of node.textContent.matchAll(/\S+/g)) {
+                        if (node === range.startContainer && source.index + source[0].length > range.startOffset) {
+                            if (word === target.word) return true;
+                            continue nextBoundary;
+                        }
+                        word++;
+                    }
+                }
+            }
+            return false;
+        }, target);
+        if (reached) return;
+        const previous = await page.evaluate(() => {
+            const driver = window.readerSpeechDriver;
+            const previous = driver.current;
+            driver.emit('end');
+            return previous;
+        });
+        await page.waitForFunction(previous => window.readerSpeechDriver.current > previous, { timeout: 10000 }, previous);
+    }
+    assert.fail('Speech did not reach source target: ' + JSON.stringify(target));
 }
 
 async function visibleIllustration(page, name, rgb) {
@@ -1314,6 +1509,238 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await page.click('#page-jump-close');
             await page.setViewport({ width: 1400, height: 960 });
             await waitForPages(page);
+        });
+
+        await t.test('app speech starts at the shown EPUB word, survives bar-height reflow and follows exact saved columns', async () => {
+            await withReaderSpeech(page, base, async () => {
+                await setSpeechReadingMode(page, 'paged');
+                await page.goto(`${base}/book/book_test_epub?ch=0&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                await openSidebar(page, 'toc');
+                await page.click('#toc-list li:nth-child(2) > a');
+                await page.waitForSelector('#Later-0');
+                await page.waitForFunction(() => getComputedStyle(document.getElementById('toc-sidebar')).visibility === 'hidden');
+                await turnSpeechPage(page);
+                await turnSpeechPage(page);
+                for (let turn = 0; turn < 8 && !(await page.evaluate(pagedWords)).first?.word; turn++)
+                    await turnSpeechPage(page);
+                const shown = await page.evaluate(pagedWords);
+                assert.ok(shown.first.word > 0 && shown.first.id.startsWith('Later-'),
+                    'This start must cut into a source paragraph after a TOC jump and page turns');
+                await openReaderSpeech(page);
+                const started = await page.evaluate(readerSpokenWord);
+                assert.deepEqual({ id: started.id, word: started.word, text: started.text }, shown.first,
+                    'Orange speech starts at the first shown word, not at the paragraph or chapter start');
+                assert.equal(started.shown, true);
+                await page.evaluate(rememberReaderSpeechDom);
+                const size = page.viewport();
+                for (const height of [size.height - 60, size.height]) {
+                    await page.setViewport({ ...size, height });
+                    await page.waitForFunction(height => innerHeight === height, {}, height);
+                    await delay(400);
+                    await waitForPages(page);
+                    assert.equal(await page.evaluate(readerSpeechDomIntact), true,
+                        'Resize must preserve the active utterance and every original source text node');
+                    const resized = await page.evaluate(readerSpokenWord);
+                    assert.equal(resized.id, started.id);
+                    assert.equal(resized.word, started.word);
+                    assert.equal(resized.shown, true);
+                }
+                const before = await page.evaluate(pagedWords);
+                const pageNumber = Number(new URL(page.url()).searchParams.get('page'));
+                assert.ok(before.next, 'The spoken chapter must have another column');
+                await advanceReaderSpeech(page, before.next);
+                await page.waitForFunction(pagedWordShown, {}, before.next);
+                await page.waitForFunction(expected => {
+                    const viewport = document.getElementById('book-viewport');
+                    return viewport.scrollLeft % viewport.clientWidth === 0 &&
+                        Number(/^Sayfa (\d+) \//u.exec(document.getElementById('paged-page-text').textContent)?.[1]) === expected &&
+                        Number(new URL(location.href).searchParams.get('page')) === expected;
+                }, {}, pageNumber + 1);
+                const total = await waitForPages(page);
+                await waitForLibrary(page, base, mode, books => {
+                    const book = books.find(book => book.id === 'book_test_epub');
+                    return book?.readerPosition?.globalPage === pageNumber + 1 &&
+                        Math.abs(book.progress - 100 * (pageNumber + 1) / total) < .01;
+                });
+                const cancelled = await page.evaluate(() => window.readerSpeechDriver.current);
+                await page.click('#tts-close');
+                const closed = await page.evaluate(pagedWords);
+                await page.evaluate(index => {
+                    const driver = window.readerSpeechDriver;
+                    driver.emit('boundary', 0, index, true);
+                    driver.emit('end', 0, index, true);
+                    driver.emit('error', 0, index, true);
+                }, cancelled);
+                await delay(250);
+                assert.equal(await page.evaluate(readerSpokenWord), null);
+                assert.equal(await page.$eval('#tts-player', card => card.classList.contains('active')), false);
+                assert.deepEqual((await page.evaluate(pagedWords)).first, closed.first,
+                    'Close and cancelled callbacks must not return to the old spoken page');
+                assert.equal(Number(new URL(page.url()).searchParams.get('page')), pageNumber + 1);
+                await openReaderSpeech(page);
+                const reopened = await page.evaluate(readerSpokenWord);
+                assert.deepEqual({ id: reopened.id, word: reopened.word, text: reopened.text }, closed.first,
+                    'Reopening starts from the retained view rather than the closed utterance');
+            });
+        });
+
+        await t.test('app speech protects PDF source pages while scrolling away and resumes the view without a forced jump', async () => {
+            await withReaderSpeech(page, base, async () => {
+                await setSpeechReadingMode(page, 'scroll');
+                await openPdf(page, base, 'book_test_typography', 1);
+                await page.waitForFunction(() => !document.getElementById('page-jump-input').disabled);
+                await openReaderSpeech(page);
+                const started = await page.evaluate(readerSpokenWord);
+                assert.equal(started.section, 0);
+                assert.equal(started.shown, true);
+                await page.evaluate(rememberReaderSpeechDom);
+                await page.click('#tts-play-pause');
+                assert.equal(await page.$eval('#tts-play-pause', button => !!button.querySelector('.fa-play')), true);
+                await page.click('#tts-play-pause');
+                assert.deepEqual(await page.evaluate(readerSpokenWord), started,
+                    'Play resumes the known onscreen word without restarting from the page heading');
+                await page.waitForFunction(() => document.querySelector('#book-content > section[data-index="1"]')?.dataset.loaded === 'true');
+                let previous = -1;
+                for (let attempt = 0; attempt < 20; attempt++) {
+                    const y = await page.evaluate(() => {
+                        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+                        return Math.round(scrollY);
+                    });
+                    await delay(300);
+                    if (y === previous) break;
+                    previous = y;
+                }
+                await page.$eval('#book-content > section[data-index="3"] .pdf-page-text', text => window.scrollTo({
+                    top: text.getBoundingClientRect().top + scrollY - 120, behavior: 'instant'
+                }));
+                await delay(400);
+                const away = await page.evaluate(() => Math.round(scrollY));
+                assert.ok(await page.evaluate(() => Number([...document.querySelectorAll('#book-content > section')]
+                    .find(section => section.getBoundingClientRect().bottom > 100)?.dataset.index) >= 2),
+                'The four-page source fixture must be two source pages past speech');
+                assert.equal(await page.evaluate(readerSpeechDomIntact), true,
+                    'The source page speech reads must retain its original DOM even outside the scroll window');
+                assert.equal(await page.$eval('#book-content > section[data-index="1"]', section => section.dataset.loaded), 'true',
+                    'The following source page remains available for natural speech continuation');
+                await page.evaluate(() => {
+                    const driver = window.readerSpeechDriver;
+                    const text = driver.records[driver.current].utterance.text;
+                    driver.emit('boundary', Array.from(text.matchAll(/\S+/g))[2]?.index || 0);
+                });
+                await delay(300);
+                assert.ok(Math.abs(await page.evaluate(() => scrollY) - away) <= 3,
+                    'Later word boundaries must not pull a reader who scrolled away back to speech');
+                assert.equal((await page.evaluate(readerSpokenWord)).section, 0);
+                await page.click('#tts-play-pause');
+                await page.click('#tts-play-pause');
+                await page.waitForFunction(() => {
+                    const range = Array.from(CSS.highlights.get('reader-tts-word') || [])[0];
+                    return Number(range?.startContainer.parentElement.closest('#book-content > section').dataset.index) >= 2;
+                });
+                assert.equal((await page.evaluate(readerSpokenWord)).shown, true,
+                    'Offscreen Play starts the visible source text rather than the retained old page');
+                assert.ok(Math.abs(await page.evaluate(() => scrollY) - away) <= 3);
+                await page.click('#tts-close');
+                await setSpeechReadingMode(page, 'paged');
+                await openPdf(page, base, 'book_test_typography', 1);
+                await waitForPages(page);
+                await openReaderSpeech(page);
+                await advanceReaderSpeech(page, { section: 1 });
+                await page.waitForFunction(() => document.querySelector('.pdf-page-text')?.textContent.includes('page 2.') &&
+                    Number(new URL(location.href).searchParams.get('page')) === 2);
+                assert.equal((await page.evaluate(readerSpokenWord)).shown, true,
+                    'Natural end events load and reveal the next real PDF source page');
+                await waitForLibrary(page, base, mode, books => books.find(book => book.id === 'book_test_typography')
+                    ?.readerPosition?.globalPage === 2);
+            });
+        });
+
+        await t.test('app speech continues EPUB sections and mode switches, pauses on TOC jumps and starts paged HTML after book changes', async () => {
+            await withReaderSpeech(page, base, async () => {
+                await setSpeechReadingMode(page, 'paged');
+                await page.goto(`${base}/book/book_test_epub?ch=0&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                const lastFirstPage = await page.evaluate(() => JSON.parse(localStorage.getItem('edgeReaderPages:book_test_epub')).counts[0]);
+                await jumpTo(page, lastFirstPage);
+                await openReaderSpeech(page);
+                await advanceReaderSpeech(page, { section: 1 });
+                await page.waitForSelector('#Later-0');
+                await page.waitForFunction(expected => Number(new URL(location.href).searchParams.get('page')) === expected,
+                    {}, lastFirstPage + 1);
+                assert.equal((await page.evaluate(readerSpokenWord)).shown, true,
+                    'Natural speech crosses an EPUB spine boundary instead of stopping at the mounted chapter');
+                await page.evaluate(rememberReaderSpeechDom);
+                const spoken = await page.evaluate(readerSpokenWord);
+                for (const readingMode of ['scroll', 'paged']) {
+                    await openSidebar(page, 'settings');
+                    await page.click(`#mode-${readingMode}-btn`);
+                    await page.click('#settings-close');
+                    await page.waitForFunction(readingMode => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden' &&
+                        document.getElementById('reader-view').classList.contains('paged-mode') === (readingMode === 'paged') &&
+                        !document.getElementById('page-jump-input').disabled, {}, readingMode);
+                    await delay(300);
+                    assert.equal(await page.evaluate(readerSpeechDomIntact), true,
+                        'Mode changes must preserve the current utterance and source nodes');
+                    const switched = await page.evaluate(readerSpokenWord);
+                    assert.equal(switched.section, spoken.section);
+                    assert.equal(switched.text, spoken.text);
+                    assert.equal(switched.shown, true);
+                }
+                const cancelled = await page.evaluate(() => window.readerSpeechDriver.current);
+                await openSidebar(page, 'toc');
+                await page.click('#toc-list li:first-child > a');
+                await page.waitForSelector('#First-0');
+                await page.waitForFunction(() => getComputedStyle(document.getElementById('toc-sidebar')).visibility === 'hidden');
+                assert.equal(await page.$eval('#tts-player', card => card.classList.contains('active')), true);
+                assert.equal(await page.$eval('#tts-play-pause', button => !!button.querySelector('.fa-play')), true,
+                    'An explicit TOC jump keeps the card but pauses the old chapter');
+                const jumped = await page.evaluate(pagedWords);
+                await page.evaluate(index => window.readerSpeechDriver.emit('end', 0, index, true), cancelled);
+                await delay(200);
+                assert.deepEqual((await page.evaluate(pagedWords)).first, jumped.first);
+                await page.click('#tts-play-pause');
+                await page.waitForFunction(() => window.readerSpeechDriver.speaking);
+                const restarted = await page.evaluate(readerSpokenWord);
+                assert.deepEqual({ id: restarted.id, word: restarted.word, text: restarted.text }, jumped.first,
+                    'Play reads the jumped page, never the previous chapter or library UI');
+                const oldBookUtterance = await page.evaluate(() => window.readerSpeechDriver.current);
+                await page.hover('#reader-nav-hit-area');
+                await page.waitForFunction(() => getComputedStyle(document.getElementById('reader-nav')).visibility === 'visible');
+                await page.click('#back-to-library');
+                await page.waitForFunction(() => getComputedStyle(document.getElementById('library-view')).display !== 'none');
+                await page.waitForFunction(title => Array.from(document.querySelectorAll('.book-title'))
+                    .some(element => element.textContent === title), { timeout: 10000 }, htmlFixture.title);
+                const cards = await page.$$('.book-card');
+                let htmlCard;
+                for (const card of cards) {
+                    if (await card.$eval('.book-title', title => title.textContent) === htmlFixture.title) {
+                        htmlCard = card;
+                        break;
+                    }
+                }
+                assert.ok(htmlCard, 'The generated HTML book must be in the real library');
+                await htmlCard.click();
+                await waitForPages(page);
+                await jumpTo(page, 2);
+                await delay(250);
+                const htmlView = await page.evaluate(pagedWords);
+                await page.evaluate(index => {
+                    const driver = window.readerSpeechDriver;
+                    driver.emit('boundary', 0, index, true);
+                    driver.emit('end', 0, index, true);
+                    driver.emit('error', 0, index, true);
+                }, oldBookUtterance);
+                await delay(250);
+                assert.deepEqual((await page.evaluate(pagedWords)).first, htmlView.first,
+                    'Cancelled callbacks from another book cannot turn or reopen the HTML reader');
+                assert.equal(await page.$eval('#tts-player', card => card.classList.contains('active')), false);
+                await openReaderSpeech(page);
+                const htmlSpoken = await page.evaluate(readerSpokenWord);
+                assert.deepEqual({ id: htmlSpoken.id, word: htmlSpoken.word, text: htmlSpoken.text }, htmlView.first,
+                    'Paged HTML speech starts at its visible text anchor, not at hidden book or UI text');
+                assert.equal(htmlSpoken.shown, true);
+            });
         });
 
         await t.test('Edge Read Aloud keeps its page and the next one mounted while the reader scrolls away', async () => {

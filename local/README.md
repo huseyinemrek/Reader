@@ -9,7 +9,7 @@ Bu klasör, yerel ağınızda (Wi-Fi / LAN) veya çevrimdışı (offline) bilgis
 - **Ağ İçi Senkronizasyon:** Aynı Wi-Fi ağındaki telefon, tablet veya diğer bilgisayarlardan sunucu IP adresi ile erişilebilir.
 - **Sayfa Sayfa ve Kaydırma Modları:** CSS Column tabanlı yatay sayfa modu ve dinamik bölüm pencereli dikey kaydırma modu.
 - **EPUB, PDF, HTML Desteği:** Kitap içi arama, sayfa atlama (G kısayolu), metin boyutu, yazı tipi ve tema özelleştirmeleri.
-- **Edge Sesli Okuma (TTS):** Cümle düzeyinde vurgulama ve hız ayarı.
+- **Uygulama Sesli Oku (Web Speech):** Turuncu düğme açık sayfanın ilk görünür kelimesinden başlar. Kelime/paragraf vurgusu, hız ve ses seçimi vardır; boyut/font ve kaydırma↔sayfalı mod değişiminde kaynak metin ve konuşma korunur. Kullanıcı uzağa kaydırınca takip bırakılır; Play son kelime ekrandaysa oradan, değilse mevcut görünümden sürer. Bölüm/PDF sayfa sonlarında sonraki metne geçilir; sayfa göstergesi ve ilerleme gerçek konumu izler. İçindekiler veya sayfaya-git eski okumayı duraklatır; Play gidilen sayfadan başlar. Kapatma konumu değiştirmez. Tarayıcının Edge Read Aloud özelliğinden ayrı `speechSynthesis` kullanır; kelime hassasiyeti seçilen sesin `boundary` olaylarına bağlıdır.
 - **Yerel PDF OCR:** GLM-OCR ile bölge bazında metin ve LaTeX tanıma; PP-DocLayoutV3 ile başlık, paragraf, algoritma, formül ve görsel yapısının çıkarılması.
 - **Sunucu düzen paketi:** EPUB/HTMLZ bölüm metni, CSS ve görsel ölçüleri arka plan worker’ında hazırlanıp diskte saklanır; sayfa hesabı tarayıcıda mevcut ekran/font ayarlarına göre yapılır.
 - **Okurken kitap ekleme:** Üst okuyucu menüsündeki `+`, çoklu seçim ve art arda ekleme; kitap adı tooltip’i olan küçük yüzde dairesi, sekme kapanırken bekleyen iş uyarısı.
@@ -199,6 +199,13 @@ $env:READER_TEST_JAVA_HOME = "C:\path\to\jdk-21"
 npm --prefix local run check
 ```
 
+Kurulu Microsoft Edge ile çalıştırmak için test tarayıcısını ayrıca seçebilirsiniz; belirtilmezse Puppeteer’ın Chromium’u kullanılır:
+
+```powershell
+$env:READER_TEST_BROWSER_EXECUTABLE = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+npm --prefix local run check
+```
+
 Chromium kurulumu, ilk emülatör JAR indirmeleri ve gerçek Firebase Web SDK / font dosyaları için internet erişimi gerekir. Python/GPU/OCR modelleri bu okuyucu regresyonlarının ön koşulu değildir.
 
 
@@ -208,8 +215,8 @@ Her commit öncesi:
 npm --prefix local run check
 ```
 
-`check`, ortak Node davranış testlerini, hosting Range/layout/upload testlerini ve `tests/reader.test.cjs` gerçek Chromium okuyucu kontrollerini birlikte çalıştırır. Yalnız okuyucu vakaları için `npm --prefix local run test:reader` kullanın. Local ve VPS ayrı geçici veri dizinlerinde, hosting izole `demo-reader-regression` projesinin resmi emülatörlerinde çalışır; hepsi yalnız `127.0.0.1` kullanır. Üretim kütüphanesi, oturumları ve kuralları değiştirilmez. Storage emülatörü `Content-Range` başlığını CORS ile açmadığından test yönlendirmesi Hosting ve gerçek Storage yanıtlarını tek origin’de aktarır; byte, Range, durum veya yanıt başlığı değiştirmez. Canlı Storage CORS doğrulamasının yerini almaz.
+`check`, ortak Node davranış testlerini, hosting Range/layout/upload testlerini ve `tests/reader.test.cjs` gerçek Chromium/Edge okuyucu kontrollerini birlikte çalıştırır. Yalnız okuyucu vakaları için `npm --prefix local run test:reader` kullanın. Local ve VPS ayrı geçici veri dizinlerinde, hosting izole `demo-reader-regression` projesinin resmi emülatörlerinde çalışır; hepsi yalnız `127.0.0.1` kullanır. Üretim kütüphanesi, oturumları ve kuralları değiştirilmez. Storage emülatörü `Content-Range` başlığını CORS ile açmadığından test yönlendirmesi Hosting ve gerçek Storage yanıtlarını tek origin’de aktarır; byte, Range, durum veya yanıt başlığı değiştirmez. Canlı Storage CORS doğrulamasının yerini almaz.
 
 PDF vurgu/göreli boyutları ve kullanıcı override’ları, kaynak yer işaretleri, gerçek kaynak canvas mürekkebi, üç düzen/ayırıcı/zoom, EPUB paketinden resimler indirilmeden sayfa hesabı, görünen resmin gerçek pikseli, yeniden boyutlandırma/font değişimi sonrası konum/ilerleme ve okurken iki gerçek dosya yüklenmesi kontrol edilir. Başarısızlık sıfır olmayan çıkış kodu verir. VPS üretim kurulumunda `--omit=dev` korunur; Puppeteer, Firebase CLI, Chromium ve Java üretim OCR bağımlılığı değildir.
 
-Bu değişikliklerin tam kontrolünde 102 davranış testi ve üç sürümde 24 gerçek okuyucu senaryosu başarılı oldu; Node okuyucu raporu üç üst kapsayıcıyla birlikte 27/27 geçti.
+Son tam kontrolde Microsoft Edge 154 ile 109 davranış testi ve üç sürümde 83 gerçek okuyucu senaryosu başarılı oldu; Node okuyucu raporu üç üst kapsayıcıyla birlikte 86/86 geçti. Uygulama sesli okumasının görünür kelime/boyut/hizalı ilerleme, PDF pencere koruma/Play ve EPUB bölüm/mod/içindekiler/kitap değişimi senaryoları her sürümde çalışır. Otomatik regresyonlar konuşma olaylarını deterministik sürer; ayrıca ayrı Edge profilinde Ahmet Online sesiyle gerçek `start`/`boundary`/`end` olayları, font/boyut ve mod değişiminde aynı kaynak düğümler ve konuşma doğrulandı.

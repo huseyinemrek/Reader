@@ -10,6 +10,7 @@ import { createUploadQueue } from './upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from './pdf-outline.js';
 import { getNativePdfBlocks, renderNativePdfBlocks } from './pdf-reader.js';
 import { installPageTurns } from './page-turn.js';
+import { createReaderTts } from './reader-tts.js';
 import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor, readerTextAnchorShift, readerTextAnchorAt,
     readerTextAnchorWord, speechHighlight, speechHighlightColumn, watchSpeechHighlight, speechStartsContainer, speechPosition,
     speechPositionWord, speechRestarted, rangeWithin, wordOnScreen, firstVisibleWord, selectForSpeech } from './reader-link-history.js';
@@ -65,6 +66,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastScrollY = 0;
     let scrollWindowAgain = false;
     let pagedAlignTimer = null;
+    let readerTts = null;
+    let ttsPosition = null;
+    let ttsInView = false;
     let resourceBase = 'https://epub.local/';
     let htmlSource = '';
     let pendingProgress = null;
@@ -221,7 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function saveSettings() {
-        const textPosition = currentBookType !== 'pdf' ? captureLinkPosition() : null;
+        const textPosition = currentBookType !== 'pdf' ? ttsLinkPosition(captureLinkPosition()) || captureLinkPosition() : null;
         localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
         applySettings();
         if (textPosition && getLayoutKey() !== layoutKey) layoutPosition ||= textPosition;
@@ -326,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function setReadingMode(mode) {
-        const position = currentBookType === 'pdf' ? null : captureLinkPosition();
+        const position = currentBookType === 'pdf' ? null : ttsLinkPosition(captureLinkPosition()) || captureLinkPosition();
         const anchor = capturePdfReadingAnchor();
         currentSettings.readingMode = mode;
         localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
@@ -334,18 +338,23 @@ document.addEventListener('DOMContentLoaded', () => {
         updateUI();
         if (!currentBookId) return;
         if (currentBookType === 'pdf') {
-            if (anchor?.section) currentPdfPage = currentGlobalPage = Number(anchor.section.dataset.pageIndex);
+            const spoken = readerTts?.section();
+            if (spoken) currentPdfPage = currentGlobalPage = Number(spoken.dataset.pageIndex);
+            else if (anchor?.section) currentPdfPage = currentGlobalPage = Number(anchor.section.dataset.pageIndex);
             localPagedIndex = currentPdfPage - 1;
             updatePagedView();
             pdfLayoutView.apply();
             if (mode === 'paged') window.scrollTo({ top: 0, behavior: 'instant' });
             restorePdfReadingAnchor(anchor);
+            restoreTtsTextAnchor();
+            readerTts?.layoutChanged();
             saveCurrentProgress();
             if (mode === 'scroll') void updateScrollWindow();
             return;
         }
         if (position) await restoreLinkPosition(position, {followSpeech: true});
         else await navigate(() => showLocation(currentChapterIndex, localPagedIndex));
+        readerTts?.layoutChanged();
         if (mode === 'scroll') updateScrollWindow();
     }
 
@@ -795,9 +804,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const paged = currentSettings.readingMode === 'paged';
             // Edge's default start is not the reading position while it is being redirected.
             const following = followSpeech && !speechRedirected;
-            // A paged view keeps the section Edge Read Aloud reads when it is mounted.
-            const spokenSection = following && paged && currentBookType !== 'pdf'
-                ? speechHighlight(bookContent)?.closest('#book-content > section') : null;
+            // Keep the section either speech player reads; changing modes must not
+            // detach its text or restart its utterance.
+            const spokenSection = followSpeech && paged && currentBookType !== 'pdf'
+                ? readerTts?.section() || (following ? speechHighlight(bookContent)?.closest('#book-content > section') : null) : null;
             const chapterIndex = spokenSection ? Number(spokenSection.dataset.index) : position.chapterIndex;
             const count = currentBookType === 'epub' ? epubSpine[chapterIndex].pageCount : totalBookPages;
             const index = currentBookType === 'pdf' ? position.localPage : chapterIndex;
@@ -809,7 +819,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (paged) {
                     // Paged mode shows one chapter: drop the scroll window's other sections.
                     const others = Array.from(bookContent.children).filter(element => element !== section);
-                    if (others.length && ttsActive) stopTTS();
                     others.forEach(element => element.remove());
                     currentChapterIndex = chapterIndex;
                     window.scrollTo({top: 0, behavior: 'instant'});
@@ -823,7 +832,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!section?.isConnected || position.bookId !== currentBookId) return;
             await settleContent(section);
             const columned = paged && currentBookType !== 'pdf';
-            const spoken = following && columned ? speechHighlightColumn(section, bookViewport) : null;
+            const spoken = columned && followSpeech && readerTts?.section() === section
+                ? ttsColumn(readerTts.range()) : following && columned ? speechHighlightColumn(section, bookViewport) : null;
             const page = spoken ?? restoreReaderTextAnchor(section.querySelector('.pdf-page-text') || section,
                 bookViewport, paged, columned, position.anchor);
             // Edge's word only picks the page; later captures measure the page itself.
@@ -837,7 +847,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             pdfReadingAnchor = capturePdfReadingAnchor();
             bookContent.focus({preventScroll: true});
-        });
+        }, {followSpeech});
     }
 
     function capturePendingTextAnchor() {
@@ -1036,7 +1046,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return paginationPromise;
     }
 
-    async function showLocation(chapterIndex, localPage = 0, scrollRatio = null) {
+    async function showLocation(chapterIndex, localPage = 0, scrollRatio = null, isCurrent = null) {
         const token = session;
         const location = ++locationVersion;
         const type = currentBookType;
@@ -1046,8 +1056,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (type === 'pdf') {
             section = await createPdfPageSection(localPage + 1);
         } else section = await makeHtmlSection(document);
-        if (token !== session || location !== locationVersion) return;
-        stopTTS();
+        if (token !== session || location !== locationVersion || (isCurrent && !isCurrent())) return;
         disposePdfPages();
         bookContent.replaceChildren(section);
         currentChapterIndex = chapterIndex;
@@ -1069,9 +1078,14 @@ document.addEventListener('DOMContentLoaded', () => {
         loadVisibleAssets();
     }
 
-    async function navigate(action) {
+    async function navigate(action, {followSpeech = false} = {}) {
         if (!currentBookId || isNavigatingPage) return false;
         const token = session;
+        if (!followSpeech) {
+            readerTts?.navigation();
+            ttsPosition = null;
+            ttsInView = false;
+        }
         isNavigatingPage = true;
         keptAnchor = null;
         updatePagedIndicator();
@@ -1088,6 +1102,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (token === session) {
                 isNavigatingPage = false;
                 updatePagedIndicator();
+                readerTts?.layoutChanged();
             }
         }
         return false;
@@ -1127,6 +1142,25 @@ document.addEventListener('DOMContentLoaded', () => {
     function goToNextPage() {return turnPage(1);}
     function goToPrevPage() {return turnPage(-1);}
 
+    async function hydrateScrollSection(index, active, token = session, location = locationVersion, isCurrent = null) {
+        let section = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
+        if (section?.dataset.loaded === 'true') return section;
+        const isEpub = currentBookType === 'epub';
+        const fresh = isEpub ? await loadEpubChapter(index) : await createPdfPageSection(index + 1);
+        if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll' || (isCurrent && !isCurrent())) return null;
+        const top = active.getBoundingClientRect().top;
+        if (section) section.replaceWith(fresh);
+        else {
+            const after = [...bookContent.children].find(element => Number(element.dataset.index) > index);
+            bookContent.insertBefore(fresh, after || null);
+        }
+        section = fresh;
+        if (!isEpub) mountPdfPage(section);
+        if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - top, behavior: 'instant'});
+        await settleContent(section);
+        return token === session && location === locationVersion ? section : null;
+    }
+
     async function updateScrollWindow() {
         // A request made while busy (a scroll or Edge entering another section) runs afterwards.
         if (scrollWindowBusy) {
@@ -1148,29 +1182,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const length = isEpub ? epubSpine.length : totalPdfPages;
             const start = Math.max(0, index - 1);
             let end = Math.min(length - 1, index + 1);
-            // Edge Read Aloud reads on from its section into the next one even after
-            // the reader scrolls away, so both stay mounted while it speaks.
-            const spoken = speechHighlight(bookContent)?.closest('#book-content > section');
-            const speaking = spoken ? [Number(spoken.dataset.index), Number(spoken.dataset.index) + 1].filter(i => i < length) : [];
-            const hydrate = async i => {
-                let section = bookContent.querySelector(':scope > section[data-index="' + i + '"]');
-                if (section?.dataset.loaded === 'true') return section;
-                let fresh;
-                if (isEpub) fresh = await loadEpubChapter(i);
-                else fresh = await createPdfPageSection(i + 1);
-                if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll') return null;
-                const anchor = active.getBoundingClientRect().top;
-                if (section) section.replaceWith(fresh);
-                else {
-                    const after = Array.from(bookContent.children).find(el => Number(el.dataset.index) > i);
-                    bookContent.insertBefore(fresh, after || null);
-                }
-                section = fresh;
-                if (!isEpub) mountPdfPage(section);
-                if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - anchor, behavior: 'instant'});
-                await settleContent(section);
-                return token === session && location === locationVersion ? section : null;
-            };
+            // Both players keep the spoken section and the following section
+            // mounted even when the reader scrolls away.
+            const spoken = [speechHighlight(bookContent)?.closest('#book-content > section'), readerTts?.section()].filter(Boolean);
+            const speaking = spoken.flatMap(section => [Number(section.dataset.index), Number(section.dataset.index) + 1]).filter(i => i < length);
+            const hydrate = i => hydrateScrollSection(i, active, token, location);
             for (let i = start; i <= end; i++) {
                 const section = await hydrate(i);
                 if (!section) return;
@@ -1184,7 +1200,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 const elementIndex = Number(element.dataset.index);
                 if ((elementIndex >= start && elementIndex <= end) || speaking.includes(elementIndex) || element.dataset.loaded !== 'true') continue;
                 const height = element.getBoundingClientRect().height;
-                if (ttsActive) stopTTS();
                 if (!isEpub) disposePdfPage(element);
                 element.replaceChildren();
                 element.style.height = height + 'px';
@@ -1299,6 +1314,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const anchor = pdfReadingAnchor;
             pdfLayoutView.apply();
             restorePdfReadingAnchor(anchor);
+            restoreTtsTextAnchor();
+            readerTts?.layoutChanged();
             return;
         }
         // A pending reflow must also follow a resize back to the counted layout.
@@ -1307,7 +1324,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const settled = settledPosition?.bookId === currentBookId &&
             settledPosition.readingMode === currentSettings.readingMode ? settledPosition : null;
         const base = settled || captureLinkPosition();
-        layoutPosition ||= spokenLinkPosition(base) || base;
+        layoutPosition ||= ttsLinkPosition(base) || spokenLinkPosition(base) || base;
         paginationAbort.abort();
         totalBookPages = 0;
         paginationFailed = false;
@@ -1330,6 +1347,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // A later geometry change keeps the remembered text and reflows again.
             if (token !== session || generation !== layoutGeneration) return;
             layoutPosition = null;
+            readerTts?.layoutChanged();
             await startPagination();
             if (token !== session || generation !== layoutGeneration || !totalBookPages) return;
             if (currentSettings.readingMode === 'scroll') syncScrollPage();
@@ -1992,292 +2010,146 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- Text to Speech (TTS) Player ---
-    let ttsActive = false;
-    let ttsPlaying = false;
-    let ttsSentences = [];
-    let currentSentenceIndex = 0;
-    let ttsUtterance = null;
-    let ttsVoices = [];
-
-    const ttsToggleBtn = document.getElementById('tts-toggle');
+    // --- App speech: the shared controller owns utterances, not reader DOM. ---
     const ttsPlayerCard = document.getElementById('tts-player');
     const ttsPlayPauseBtn = document.getElementById('tts-play-pause');
-    const ttsPrevBtn = document.getElementById('tts-prev-sentence');
-    const ttsNextBtn = document.getElementById('tts-next-sentence');
     const ttsSpeedSelect = document.getElementById('tts-speed');
     const ttsVoiceSelect = document.getElementById('tts-voice');
-    const ttsCloseBtn = document.getElementById('tts-close');
-
-    function loadVoices() {
-        if (typeof window.speechSynthesis === 'undefined') return;
-        ttsVoices = window.speechSynthesis.getVoices();
-        ttsVoiceSelect.innerHTML = '';
-        
-        const trVoices = ttsVoices.filter(v => v.lang.startsWith('tr') || v.lang.startsWith('tr-TR'));
-        const otherVoices = ttsVoices.filter(v => !v.lang.startsWith('tr'));
-        
-        trVoices.sort((a, b) => {
-            const aNatural = a.name.toLowerCase().includes('natural');
-            const bNatural = b.name.toLowerCase().includes('natural');
-            if (aNatural && !bNatural) return -1;
-            if (!aNatural && bNatural) return 1;
-            return a.name.localeCompare(b.name);
-        });
-
-        trVoices.forEach(voice => {
-            const option = document.createElement('option');
-            option.value = voice.name;
-            option.innerText = voice.name.replace('Microsoft ', '').replace('Online (Natural) - ', '🤖 ');
-            if (voice.name.includes('Ahmet') && voice.name.includes('Natural')) {
-                option.selected = true;
-            }
-            ttsVoiceSelect.appendChild(option);
-        });
-        
-        if (trVoices.length === 0) {
-            const option = document.createElement('option');
-            option.disabled = true;
-            option.innerText = 'Türkçe ses bulunamadı';
-            ttsVoiceSelect.appendChild(option);
+    readerTts = createReaderTts({
+        content: bookContent, speedSelect: ttsSpeedSelect, voiceSelect: ttsVoiceSelect,
+        getRoots: ttsRoots, getStartWord: ttsStartWord,
+        getContext: () => ({bookId: currentBookId, paged: currentSettings.readingMode === 'paged',
+            columned: currentSettings.readingMode === 'paged' && currentBookType !== 'pdf',
+            busy: isNavigatingPage || !!layoutPosition}),
+        reveal: revealTtsWord, nextSection: nextTtsSection,
+        onPosition: word => {
+            const section = word.startContainer.parentElement.closest('#book-content > section');
+            const previous = ttsPosition?.sectionIndex;
+            const anchor = readerTextAnchorAt(section.querySelector('.pdf-page-text') || section,
+                word.startContainer, word.startOffset, currentSettings.readingMode === 'paged');
+            if (!anchor) return;
+            const bounds = readerViewBounds(currentSettings.readingMode === 'paged');
+            anchor.top = word.getBoundingClientRect().top - (anchor.paged ? bounds.top : 80);
+            ttsPosition = {sectionIndex: Number(section.dataset.index), anchor};
+            ttsInView = rangeWithin(word, bounds);
+            if (previous !== ttsPosition.sectionIndex && currentSettings.readingMode === 'scroll') void updateScrollWindow();
+        },
+        onState: ({active, playing}) => {
+            ttsPlayerCard.classList.toggle('active', active);
+            ttsPlayPauseBtn.innerHTML = playing ? '<i class="fa-solid fa-pause"></i>' : '<i class="fa-solid fa-play"></i>';
         }
-        
-        const enVoices = otherVoices.filter(v => v.lang.startsWith('en'));
-        if (enVoices.length > 0) {
-            const optGroup = document.createElement('optgroup');
-            optGroup.label = 'İngilizce ve Diğer Sesler';
-            enVoices.forEach(voice => {
-                const option = document.createElement('option');
-                option.value = voice.name;
-                option.innerText = voice.name.replace('Microsoft ', '').replace('Online (Natural) - ', '🤖 ');
-                optGroup.appendChild(option);
-            });
-            ttsVoiceSelect.appendChild(optGroup);
-        }
-
-        const savedVoice = localStorage.getItem('ttsVoice');
-        if (savedVoice) {
-            const option = Array.from(ttsVoiceSelect.options).find(opt => opt.value === savedVoice);
-            if (option) {
-                Array.from(ttsVoiceSelect.options).forEach(opt => opt.selected = false);
-                option.selected = true;
-                ttsVoiceSelect.value = savedVoice;
-            }
-        }
-        
-        const savedSpeed = localStorage.getItem('ttsSpeed');
-        if (savedSpeed) {
-            ttsSpeedSelect.value = savedSpeed;
-        }
-    }
-
-    if (typeof window.speechSynthesis !== 'undefined') {
-        window.speechSynthesis.getVoices();
-        if (window.speechSynthesis.onvoiceschanged !== undefined) {
-            window.speechSynthesis.onvoiceschanged = loadVoices;
-        }
-        setTimeout(loadVoices, 500);
-        setTimeout(loadVoices, 2000);
-    }
-
-    function clearTTSHighlight() {
-        const highlighted = bookContent.querySelectorAll('.tts-highlight');
-        highlighted.forEach(el => el.classList.remove('tts-highlight'));
-    }
-
-    function prepareTextForTTS() {
-        clearTTSHighlight();
-        const paragraphs = bookContent.querySelectorAll('p, h1, h2, h3, li');
-        let sentenceIndex = 0;
-        ttsSentences = [];
-        
-        paragraphs.forEach(p => {
-            if (p.classList.contains('book-main-title')) return;
-            const text = p.innerText.trim();
-            if (!text) return;
-            
-            p.classList.add('tts-sentence');
-            p.dataset.index = sentenceIndex;
-            
-            p.onclick = (e) => {
-                e.stopPropagation();
-                if (ttsActive) {
-                    playSentence(parseInt(p.dataset.index));
-                }
-            };
-            
-            ttsSentences.push({
-                text: text,
-                span: p,
-                element: p
-            });
-            sentenceIndex++;
-        });
-    }
-
-    function playSentence(index) {
-        if (typeof window.speechSynthesis === 'undefined') return;
-        if (index < 0 || index >= ttsSentences.length) {
-            stopTTS();
-            return;
-        }
-        
-        window.speechSynthesis.cancel();
-        clearTTSHighlight();
-        
-        currentSentenceIndex = index;
-        const current = ttsSentences[index];
-        current.span.classList.add('tts-highlight');
-        
-        const rect = current.span.getBoundingClientRect();
-        if (currentSettings.readingMode === 'paged') {
-            if (currentBookType === 'epub' && bookViewport) {
-                const vpRect = bookViewport.getBoundingClientRect();
-                if (rect.left < vpRect.left || rect.right > vpRect.right) {
-                    const step = bookViewport.clientWidth || 900;
-                    const targetPage = Math.floor((rect.left - vpRect.left + bookViewport.scrollLeft) / step);
-                    localPagedIndex = targetPage;
-                    bookViewport.scrollTo({ left: targetPage * step, behavior: 'smooth' });
-                    updatePagedIndicator();
-                }
-            } else if (currentBookType === 'pdf') {
-                const pdfSec = current.span.closest('.pdf-page');
-                if (pdfSec) {
-                    const pNum = parseInt(pdfSec.dataset.pageIndex);
-                    if (pNum && pNum !== currentPdfPage) {
-                        currentPdfPage = pNum;
-                        updatePagedView(true);
-                    }
-                }
-            }
-        } else {
-            if (rect.top < 100 || rect.bottom > window.innerHeight - 150) {
-                current.span.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
-        }
-        
-        ttsUtterance = new SpeechSynthesisUtterance(current.text);
-        ttsUtterance.rate = parseFloat(ttsSpeedSelect.value) || 1.0;
-        
-        const selectedVoice = ttsVoices.find(v => v.name === ttsVoiceSelect.value);
-        if (selectedVoice) {
-            ttsUtterance.voice = selectedVoice;
-            ttsUtterance.lang = selectedVoice.lang;
-        } else {
-            ttsUtterance.lang = 'tr-TR';
-        }
-        
-        ttsUtterance.onend = () => {
-            if (ttsPlaying) {
-                playSentence(currentSentenceIndex + 1);
-            }
-        };
-        
-        ttsUtterance.onerror = (e) => {
-            console.warn("TTS Event Error:", e);
-            if ((e.error === 'voice-unavailable' || e.error === 'network') && ttsVoiceSelect.selectedIndex > 0) {
-                ttsVoiceSelect.selectedIndex = 0;
-                setTimeout(() => playSentence(index), 100);
-                return;
-            }
-            if (e.error !== 'interrupted' && ttsPlaying) {
-                playSentence(currentSentenceIndex + 1);
-            }
-        };
-        
-        window.speechSynthesis.speak(ttsUtterance);
-        ttsPlaying = true;
-        updatePlayPauseBtnIcon();
-    }
-
-    function updatePlayPauseBtnIcon() {
-        if (ttsPlaying) {
-            ttsPlayPauseBtn.innerHTML = '<i class="fa-solid fa-pause"></i>';
-        } else {
-            ttsPlayPauseBtn.innerHTML = '<i class="fa-solid fa-play"></i>';
-        }
-    }
-
-    function togglePlayPause() {
-        if (!ttsActive) return;
-        if (ttsPlaying) {
-            window.speechSynthesis.pause();
-            ttsPlaying = false;
-            updatePlayPauseBtnIcon();
-        } else {
-            if (window.speechSynthesis.paused) {
-                window.speechSynthesis.resume();
-                ttsPlaying = true;
-                updatePlayPauseBtnIcon();
-            } else {
-                playSentence(currentSentenceIndex);
-            }
-        }
-    }
+    });
 
     function stopTTS() {
-        if (typeof window.speechSynthesis !== 'undefined') {
-            window.speechSynthesis.cancel();
-        }
-        clearTTSHighlight();
-        ttsPlaying = false;
-        ttsActive = false;
-        ttsSentences = [];
-        ttsPlayerCard.classList.remove('active');
-        updatePlayPauseBtnIcon();
-        
-        const sentences = bookContent.querySelectorAll('.tts-sentence');
-        sentences.forEach(el => {
-            el.classList.remove('tts-sentence');
-            delete el.dataset.index;
-            el.onclick = null;
-        });
+        readerTts?.stop();
+        ttsPosition = null;
+        ttsInView = false;
     }
 
-    function startTTS() {
-        ttsActive = true;
-        prepareTextForTTS();
-        loadVoices();
-        ttsPlayerCard.classList.add('active');
-        
-        let startFrom = 0;
-        const scrollMiddle = window.scrollY + window.innerHeight / 3;
-        for (let i = 0; i < ttsSentences.length; i++) {
-            const rect = ttsSentences[i].span.getBoundingClientRect();
-            const absTop = rect.top + window.scrollY;
-            if (absTop >= scrollMiddle) {
-                startFrom = i;
-                break;
+    function ttsRoots() {
+        return [...bookContent.children].filter(section => section.dataset.loaded !== 'false')
+            .map(section => currentBookType === 'pdf' ? section.querySelector('.pdf-page-text') : section)
+            .filter(root => root && !root.querySelector('.pdf-empty-text'));
+    }
+
+    function ttsStartWord() {
+        const paged = currentSettings.readingMode === 'paged';
+        const roots = ttsRoots();
+        const kept = paged && keptAnchor && roots.find(root => Number(root.dataset.index) === keptAnchor.sectionIndex);
+        const word = kept && readerTextAnchorWord(kept, keptAnchor.anchor);
+        const screen = readerViewBounds(paged);
+        return word && rangeWithin(word, screen) ? word : firstVisibleWord(roots, paged ? screen : {...screen, top: 80});
+    }
+
+    function ttsColumn(word) {
+        if (!word || !bookViewport.clientWidth) return null;
+        return Math.max(0, Math.floor((word.getBoundingClientRect().left - bookViewport.getBoundingClientRect().left +
+            bookViewport.scrollLeft) / bookViewport.clientWidth));
+    }
+
+    function ttsLinkPosition(base) {
+        if (!readerTts?.range() || !ttsInView || !ttsPosition || !base) return null;
+        return {...base, chapterIndex: currentBookType === 'epub' ? ttsPosition.sectionIndex : 0,
+            anchor: ttsPosition.anchor, spoken: true};
+    }
+
+    function restoreTtsTextAnchor() {
+        if (!readerTts?.range() || !ttsInView || !ttsPosition) return;
+        const section = readerTts.section();
+        restoreReaderTextAnchor(section?.querySelector('.pdf-page-text') || section, bookViewport,
+            currentSettings.readingMode === 'paged', false, ttsPosition.anchor);
+    }
+
+    function revealTtsWord(word) {
+        if (isNavigatingPage || layoutPosition || !word.startContainer.isConnected) return;
+        const section = word.startContainer.parentElement.closest('#book-content > section');
+        const paged = currentSettings.readingMode === 'paged';
+        if (paged && currentBookType !== 'pdf') {
+            const chapter = Number(section.dataset.index);
+            const page = ttsColumn(word);
+            if (chapter !== currentChapterIndex || page !== localPagedIndex ||
+                Math.abs(bookViewport.scrollLeft - page * bookViewport.clientWidth) > 1) {
+                currentChapterIndex = chapter;
+                localPagedIndex = page;
+                keptAnchor = null;
+                updatePagedView();
+                saveCurrentProgress();
+            }
+        } else {
+            if (currentBookType === 'pdf' && paged) {
+                const page = Number(section.dataset.pageIndex);
+                if (page !== currentPdfPage) {
+                    currentPdfPage = page;
+                    localPagedIndex = page - 1;
+                    updatePagedView();
+                    saveCurrentProgress();
+                }
+            }
+            const bounds = readerViewBounds(paged);
+            const rect = word.getBoundingClientRect();
+            if (!rangeWithin(word, bounds)) {
+                (paged ? bookViewport : window).scrollBy({top: rect.top - (paged ? bounds.top + 20 : 80), behavior: 'instant'});
+                if (paged) saveCurrentProgress();
+                else syncScrollPage();
             }
         }
-        
-        playSentence(startFrom);
+        loadVisibleAssets();
     }
 
-    ttsToggleBtn.addEventListener('click', () => {
-        if (ttsActive) {
-            stopTTS();
+    async function nextTtsSection(section, direction, isCurrent) {
+        const index = Number(section.dataset.index) + direction;
+        const length = currentBookType === 'epub' ? epubSpine.length : currentBookType === 'pdf' ? totalPdfPages : 1;
+        if (index < 0 || index >= length || !isCurrent()) return null;
+        const token = session;
+        const location = locationVersion;
+        if (currentSettings.readingMode === 'paged') {
+            const moved = await navigate(() => showLocation(currentBookType === 'epub' ? index : 0,
+                currentBookType === 'pdf' ? index : direction < 0 ? Number.MAX_SAFE_INTEGER : 0, null, isCurrent), {followSpeech: true});
+            if (!moved || token !== session || !isCurrent()) return null;
         } else {
-            startTTS();
+            const active = [...bookContent.children].find(element => element.getBoundingClientRect().bottom > 100) || section;
+            if (!await hydrateScrollSection(index, active, token, location, isCurrent)) return null;
         }
-    });
+        const next = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
+        await pdfPageStates.get(next)?.hydration;
+        return token === session && isCurrent() && next?.isConnected ? next : null;
+    }
 
-    ttsPlayPauseBtn.addEventListener('click', togglePlayPause);
-    ttsPrevBtn.addEventListener('click', () => {
-        if (currentSentenceIndex > 0) playSentence(currentSentenceIndex - 1);
-    });
-    ttsNextBtn.addEventListener('click', () => {
-        if (currentSentenceIndex + 1 < ttsSentences.length) playSentence(currentSentenceIndex + 1);
-    });
-    ttsSpeedSelect.addEventListener('change', () => {
-        localStorage.setItem('ttsSpeed', ttsSpeedSelect.value);
-        if (ttsPlaying) playSentence(currentSentenceIndex);
-    });
-    ttsVoiceSelect.addEventListener('change', () => {
-        localStorage.setItem('ttsVoice', ttsVoiceSelect.value);
-        if (ttsPlaying) playSentence(currentSentenceIndex);
-    });
-    ttsCloseBtn.addEventListener('click', stopTTS);
+    function rememberTtsView() {
+        const word = readerTts?.range();
+        if (!word || layoutPosition) return;
+        const paged = currentSettings.readingMode === 'paged';
+        const bounds = readerViewBounds(paged);
+        ttsInView = rangeWithin(word, bounds);
+        if (ttsInView && ttsPosition) ttsPosition.anchor.top = word.getBoundingClientRect().top - (paged ? bounds.top : 80);
+    }
+    window.addEventListener('scroll', rememberTtsView, {passive: true});
+    bookViewport.addEventListener('scroll', rememberTtsView, {passive: true});
+    document.getElementById('tts-toggle').addEventListener('click', () => readerTts.active ? stopTTS() : readerTts.start());
+    ttsPlayPauseBtn.addEventListener('click', () => readerTts.togglePlayPause());
+    document.getElementById('tts-prev-sentence').addEventListener('click', () => readerTts.step(-1));
+    document.getElementById('tts-next-sentence').addEventListener('click', () => readerTts.step(1));
+    document.getElementById('tts-close').addEventListener('click', stopTTS);
 
     // --- Init ---
     loadSettings();
