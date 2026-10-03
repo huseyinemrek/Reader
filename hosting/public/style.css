@@ -152,7 +152,7 @@ body {
     color: var(--text-color) !important;
 }
 
-#book-content[data-theme-override="true"] * {
+#book-content[data-theme-override="true"] *:not(msreadoutspan) {
     color: var(--text-color) !important;
 }
 
@@ -1145,12 +1145,6 @@ img.book-cover {
     color: white;
 }
 
-#toc-list a.active {
-    background: var(--ui-primary);
-    color: white;
-    font-weight: 600;
-}
-
 .book-main-title {
     font-size: 2.4rem;
     font-family: 'Outfit', sans-serif;
@@ -1163,26 +1157,6 @@ img.book-cover {
 }
 
 /* --- TTS PLAYER FLOATING CARD --- */
-.tts-highlight {
-    background-color: rgba(255, 152, 0, 0.25);
-    border-radius: 4px;
-    box-shadow: 0 0 12px rgba(255, 152, 0, 0.4);
-    color: var(--text-color);
-    transition: background-color 0.2s ease, color 0.2s;
-    outline: 1px dashed rgba(255, 152, 0, 0.8);
-}
-
-/* OLED theme active highlight styling */
-[style*="--bg-color: #000000"] .tts-highlight,
-[style*="--bg-color:#000000"] .tts-highlight {
-    background-color: rgba(255, 152, 0, 0.35);
-}
-
-::highlight(reader-tts-word) {
-    background-color: rgba(255, 152, 0, 0.65);
-    color: var(--text-color);
-}
-
 .tts-player-card {
     position: fixed;
     bottom: 30px;

@@ -11,6 +11,7 @@ import { loadPdfOutline, renderPdfToc } from './pdf-outline.js';
 import { getNativePdfBlocks, renderNativePdfBlocks } from './pdf-reader.js';
 import { installPageTurns } from './page-turn.js';
 import { createReaderTts } from './reader-tts.js';
+import { updateReaderToc } from './reader-toc.js';
 import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor, readerTextAnchorShift, readerTextAnchorAt,
     readerTextAnchorWord, speechHighlight, speechHighlightColumn, watchSpeechHighlight, speechStartsContainer, speechPosition,
     speechPositionWord, speechRestarted, rangeWithin, wordOnScreen, firstVisibleWord, selectForSpeech } from './reader-link-history.js';
@@ -410,6 +411,7 @@ document.addEventListener('DOMContentLoaded', () => {
     settingsClose.addEventListener('click', () => closeSidebar(settingsSidebar));
 
     tocToggle.addEventListener('click', () => {
+        updateCurrentToc()?.scrollIntoView({ block: 'nearest' });
         openSidebar(tocSidebar);
         closeSidebar(settingsSidebar);
     });
@@ -712,6 +714,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updatePagedIndicator() {
+        updateCurrentToc();
         const ready = totalBookPages > 0;
         if (ready && currentBookType === 'epub') {
             currentGlobalPage = epubSpine[currentChapterIndex].startPage + localPagedIndex;
@@ -1462,6 +1465,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } finally {if (token === session) hideLoading();}
     }
 
+    function updateCurrentToc() {
+        return updateReaderToc(tocList, currentBookType === 'pdf'
+            ? { pdfPage: currentPdfPage } : { sectionIndex: currentChapterIndex });
+    }
+
     function renderToc(book) {
         tocList.replaceChildren();
         if (currentBookType === 'pdf') {
@@ -1470,12 +1478,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 onNavigate: async page => { closeSidebar(tocSidebar); await linkHistory.follow(() => goToPage(page)); }
             });
             if (!tocList.children.length) tocList.textContent = 'PDF’de yer işareti/içindekiler kaydı bulunamadı.';
+            updateCurrentToc();
             return;
         }
         for (const item of book.toc || []) {
             const li = document.createElement('li');
             const link = document.createElement('a');
             link.href = item.link; link.textContent = item.title;
+            const index = epubSpine.findIndex(ch => ch.id === item.link.replace(/^#/, ''));
+            if (index >= 0) link.dataset.sectionIndex = index;
             link.addEventListener('click', async event => {
                 event.preventDefault();
                 const target = item.link.replace(/^#/, '');
@@ -1488,6 +1499,7 @@ document.addEventListener('DOMContentLoaded', () => {
             li.appendChild(link); tocList.appendChild(li);
         }
         if (!tocList.children.length) tocList.textContent = 'İçindekiler bulunamadı';
+        updateCurrentToc();
     }
 
     // --- File Processing (Adding to Firebase) ---

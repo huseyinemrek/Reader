@@ -27,7 +27,8 @@ let imageGapEpubFixture;
 let semanticEpubFixture;
 let uploadFixtures;
 
-before(async () => {
+let setup;
+before(() => setup = (async () => {
     fixtureDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-generated-fixtures-'));
     epubFixture = await makeEpub(fixtureDirectory);
     pdfGraphicsFixture = await makePdfGraphics(fixtureDirectory);
@@ -48,8 +49,11 @@ before(async () => {
         args: ['--disable-features=BackForwardCache',
             ...(process.platform === 'win32' ? ['--edge-skip-compat-layer-relaunch'] : [])]
     });
-});
+})());
 after(async () => {
+    // When a name filter selects no test, node:test starts this hook while before() is
+    // still launching the browser; closing only after setup keeps the run from hanging.
+    await setup?.catch(() => {});
     try { await browser?.close(); }
     finally { if (fixtureDirectory) await fs.rm(fixtureDirectory, { recursive: true, force: true }); }
 });
@@ -1321,6 +1325,201 @@ for (const mode of ['local', 'vps', 'hosting']) {
             } finally {
                 await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
                 await page.setViewport({ width: 1400, height: 960 });
+            }
+        });
+
+        await t.test('Edge speech marks keep table geometry and Edge colors; app speech uses theme colors', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const geometry = () => [...document.querySelectorAll('#large-table th, #large-table td')].map(cell => {
+                const rect = cell.getBoundingClientRect();
+                return [rect.x, rect.y, rect.width, rect.height];
+            });
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    readingMode: 'paged', fontFamily: 'Arial', fontSize: 19, lineHeight: 1.5,
+                    maxWidth: 900, sidePadding: 80, paragraphSpacing: .9
+                })));
+                await page.goto(`${base}/book/book_test_semantic?ch=1&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                await page.waitForSelector('.reader-object-viewport #large-table');
+                const before = await page.evaluate(geometry);
+                // Edge 154 injects these rules and, reading a header cell, wraps the source
+                // newlines between the cells of that row in line marks (children of <tr>).
+                // Without the shared rule each wrapper becomes an anonymous empty cell.
+                await page.evaluate(() => {
+                    const sheet = document.createElement('style');
+                    sheet.id = 'edge-read-aloud-sheet';
+                    sheet.textContent = '.msreadout-word-highlight:not(.msreadout-inactive-highlight) { background: rgb(255, 255, 0) !important; color: black !important; }' +
+                        '.msreadout-line-highlight:not(.msreadout-inactive-highlight) { background: rgb(178, 214, 243) !important; color: black !important; }';
+                    document.head.append(sheet);
+                    const table = document.getElementById('large-table');
+                    window.speechTableCells = [...table.querySelectorAll('th,td')];
+                    const header = table.querySelector('thead tr');
+                    for (const cell of [...header.cells, null]) {
+                        const newline = document.createElement('msreadoutspan');
+                        newline.className = 'msreadout-line-highlight';
+                        newline.textContent = '\n';
+                        header.insertBefore(newline, cell);
+                    }
+                    const cell = header.cells[0];
+                    const line = document.createElement('msreadoutspan');
+                    line.className = 'msreadout-line-highlight';
+                    const word = document.createElement('msreadoutspan');
+                    word.className = 'msreadout-word-highlight';
+                    const range = document.createRange(); range.selectNodeContents(cell);
+                    range.surroundContents(line);
+                    range.selectNodeContents(line); range.surroundContents(word);
+                });
+                assert.equal(await page.$$eval('#large-table thead tr > msreadoutspan', spans => spans.length), 4);
+                assert.deepEqual(await page.evaluate(geometry), before,
+                    'Edge speech wrappers must preserve every cell position, size and merged-row relationship');
+                assert.equal(await page.evaluate(() => window.speechTableCells.every(cell => cell.isConnected)), true,
+                    'Speech keeps the original table cells mounted');
+                // Exercise real settings controls while the speech marks remain in place:
+                // no theme may repaint Edge's own marks or add the app's speech style to them.
+                for (const theme of ['dark', 'light', 'sepia', 'oled']) {
+                    await openSidebar(page, 'settings');
+                    await page.click(`.theme-btn[data-theme="${theme}"]`);
+                    await page.click('#settings-close');
+                    await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+                    const paint = await page.evaluate(() => {
+                        const word = document.querySelector('#large-table .msreadout-word-highlight');
+                        const line = word.closest('.msreadout-line-highlight');
+                        const cell = getComputedStyle(word.closest('th'));
+                        return { word: [getComputedStyle(word).backgroundColor, getComputedStyle(word).color],
+                            line: [getComputedStyle(line).backgroundColor, getComputedStyle(line).color],
+                            cell: [cell.backgroundColor, cell.outlineStyle] };
+                    });
+                    assert.deepEqual(paint.word, ['rgb(255, 255, 0)', 'rgb(0, 0, 0)'], `${theme}: Edge keeps its word paint`);
+                    assert.deepEqual(paint.line, ['rgb(178, 214, 243)', 'rgb(0, 0, 0)'], `${theme}: Edge keeps its line paint`);
+                    assert.deepEqual(paint.cell, ['rgba(0, 0, 0, 0)', 'none'], `${theme}: the app adds no mark to Edge's passage`);
+                }
+                assert.deepEqual(await page.evaluate(geometry), before, 'Theme changes keep the marked table intact');
+                await page.evaluate(() => document.getElementById('edge-read-aloud-sheet').remove());
+                await page.click('[data-reader-object-expand]');
+                await page.waitForSelector('dialog.reader-object-dialog[open] #large-table');
+                assert.equal(await page.$$eval('#large-table', tables => tables.length), 1);
+                assert.equal(await page.$eval('#large-table [rowspan]', cell => cell.rowSpan), 2);
+                await page.keyboard.press('Escape');
+                await page.waitForFunction(() => !document.querySelector('dialog.reader-object-dialog[open]'));
+                await page.evaluate(speakWord);
+                assert.equal(await page.$eval('#large-table', table => table.querySelectorAll('tr').length), 56);
+                await page.$eval('.reader-object-viewport', viewport => { viewport.scrollTop = viewport.scrollHeight; });
+                assert.equal(await page.$eval('#table-row-54', row => {
+                    const rect = row.getBoundingClientRect(), box = row.closest('.reader-object-viewport').getBoundingClientRect();
+                    return rect.top >= box.top && rect.bottom <= box.bottom + 1;
+                }), true, 'The last row remains reachable after speech and expansion');
+            } finally {
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+            }
+            await withReaderSpeech(page, base, async () => {
+                await setSpeechReadingMode(page, 'paged');
+                await page.goto(`${base}/book/book_test_epub?ch=0&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                const before = await page.evaluate(pagedWords);
+                await openReaderSpeech(page);
+                assert.deepEqual((await page.evaluate(pagedWords)).first, before.first,
+                    'The app paragraph outline must not reflow the page');
+                for (const theme of ['dark', 'light', 'sepia', 'oled']) {
+                    await openSidebar(page, 'settings');
+                    await page.click(`.theme-btn[data-theme="${theme}"]`);
+                    await page.click('#settings-close');
+                    await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+                    const paint = await page.$eval('.tts-highlight', block => {
+                        const css = getComputedStyle(block);
+                        const word = getComputedStyle(block, '::highlight(reader-tts-word)');
+                        const context = document.createElement('canvas').getContext('2d');
+                        const rgb = color => {
+                            context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--container-bg');
+                            context.fillRect(0, 0, 1, 1);
+                            context.fillStyle = color; context.fillRect(0, 0, 1, 1);
+                            return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+                        };
+                        const luminance = color => rgb(color).map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; })
+                            .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+                        const a = luminance(word.color), b = luminance(word.backgroundColor);
+                        return { fill: css.backgroundColor, ink: css.color, outline: css.outlineColor, style: css.outlineStyle,
+                            wordInk: word.color, wordFill: rgb(word.backgroundColor).join(), canvas: rgb('transparent').join(),
+                            wordUnderline: word.textDecorationLine, contrast: (Math.max(a, b) + .05) / (Math.min(a, b) + .05) };
+                    });
+                    assert.equal(paint.fill, 'rgba(0, 0, 0, 0)', `${theme}: the read passage keeps the canvas behind its text`);
+                    assert.equal(paint.style, 'dashed', `${theme}: the read passage is framed`);
+                    assert.equal(paint.outline, paint.ink, `${theme}: the frame uses the theme text color`);
+                    assert.equal(paint.wordInk, paint.ink, `${theme}: the read word keeps the theme text color`);
+                    assert.equal(paint.wordUnderline, 'underline', `${theme}: the read word is underlined`);
+                    assert.notEqual(paint.wordFill, paint.canvas, `${theme}: the read word is tinted`);
+                    assert.ok(paint.contrast >= 4.5, `${theme}: the read word remains readable (${paint.contrast.toFixed(2)})`);
+                }
+                assert.equal(await page.evaluate(() => window.readerSpeechDriver.speaking), true, 'Theme changes do not stop app speech');
+                if (process.env.READER_TEST_SCREENSHOT_DIR) {
+                    await fs.mkdir(process.env.READER_TEST_SCREENSHOT_DIR, { recursive: true });
+                    await page.screenshot({ path: path.join(process.env.READER_TEST_SCREENSHOT_DIR, `${mode}-speech-theme.png`), captureBeyondViewport: false });
+                }
+            });
+        });
+
+        await t.test('current TOC destination follows pages, scroll mode, themes and reopening', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const restoreSettings = () => page.evaluate(settings => {
+                if (settings === null) localStorage.removeItem('edgeReaderSettings');
+                else localStorage.setItem('edgeReaderSettings', settings);
+            }, settings);
+            const active = () => [...document.querySelectorAll('#toc-list a[aria-current="location"]')].map(link => link.textContent);
+            const closePanel = async name => {
+                await page.click(`#${name}-close`);
+                await page.waitForFunction(id => getComputedStyle(document.getElementById(id)).visibility === 'hidden', {}, `${name}-sidebar`);
+            };
+            try {
+                await page.goto(`${base}/book/book_test_epub?ch=1&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                assert.deepEqual(await page.evaluate(active), ['Later journey']);
+                // Each reader theme marks the current section in its own text color.
+                for (const theme of ['dark', 'light', 'sepia', 'oled']) {
+                    await openSidebar(page, 'settings');
+                    await page.click(`.theme-btn[data-theme="${theme}"]`);
+                    await closePanel('settings');
+                    await openSidebar(page, 'toc');
+                    const colors = await page.$eval('#toc-list a.active', link => {
+                        const css = getComputedStyle(link), other = getComputedStyle(link.closest('ul, ol').querySelector('a:not(.active)'));
+                        return { color: css.color, ink: getComputedStyle(document.getElementById('book-content')).color,
+                            background: css.backgroundColor, otherBackground: other.backgroundColor, bar: css.boxShadow };
+                    });
+                    assert.equal(colors.color, colors.ink, `${theme}: the current section uses the theme text color`);
+                    assert.notEqual(colors.background, colors.otherBackground, `${theme}: the current section is tinted`);
+                    assert.ok(colors.bar.startsWith(colors.ink), `${theme}: the current section has a theme-colored bar`);
+                    if (process.env.READER_TEST_SCREENSHOT_DIR) {
+                        await fs.mkdir(process.env.READER_TEST_SCREENSHOT_DIR, { recursive: true });
+                        await page.screenshot({ path: path.join(process.env.READER_TEST_SCREENSHOT_DIR, `${mode}-current-toc-${theme}.png`), captureBeyondViewport: false });
+                    }
+                    if (theme !== 'oled') await closePanel('toc');
+                }
+                await page.click('#toc-list li:first-child > a');
+                await page.waitForSelector('#First-0');
+                assert.deepEqual(await page.evaluate(active), ['First journey']);
+                const firstCount = await page.evaluate(() => JSON.parse(localStorage.getItem('edgeReaderPages:book_test_epub')).counts[0]);
+                await jumpTo(page, firstCount + 1);
+                assert.deepEqual(await page.evaluate(active), ['Later journey']);
+                await page.goto(page.url(), { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                assert.deepEqual(await page.evaluate(active), ['Later journey']);
+                await openSidebar(page, 'settings');
+                await page.click('#mode-scroll-btn');
+                await closePanel('settings');
+                await page.waitForSelector('#First-0');
+                await page.$eval('#First-0', p => p.scrollIntoView({ block: 'start' }));
+                await page.waitForFunction(() => document.querySelector('#toc-list a.active')?.textContent === 'First journey');
+                // PDF bookmarks are checked in the reading mode the other PDF cases use.
+                await restoreSettings();
+                await openPdf(page, base, 'book_test_typography', 3);
+                assert.deepEqual(await page.evaluate(active), ['Nested section']);
+                await jumpTo(page, 4);
+                assert.deepEqual(await page.evaluate(active), ['Last chapter']);
+                await jumpTo(page, 1);
+                assert.deepEqual(await page.evaluate(active), [], 'No source bookmark is current before its first destination');
+            } finally {
+                await restoreSettings();
             }
         });
 
