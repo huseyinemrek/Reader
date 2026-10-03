@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/style.css?v=20260925_typography">
     <link rel="stylesheet" href="/pdf-layout.css">
     <link rel="stylesheet" href="/reader-link-history.css">
+    <link rel="stylesheet" href="/page-turn.css">
     <!-- JSZip for handling HTMLZ (Zip) files -->
     <script src="/libs/jszip.min.js"></script>
     <!-- Same native PDF/font engine as local/VPS; no server or OCR in hosting. -->
@@ -77,9 +78,9 @@
         <button class="icon-btn" id="tts-toggle" title="Sesli Oku" style="background: linear-gradient(135deg, #FF9800 0%, #FF5722 100%); color: white; box-shadow: 0 4px 15px rgba(255,152,0,0.4);"><i class="fa-solid fa-headphones"></i></button>
         <button class="icon-btn" id="settings-toggle" title="Ayarlar" style="background: var(--ui-primary); color: white; box-shadow: 0 4px 15px rgba(33,150,243,0.4);"><i class="fa-solid fa-gear"></i></button>
 
-        <!-- Page Navigation Buttons (for Paged Mode) -->
-        <button class="paged-nav-btn" id="paged-prev-btn" title="Önceki Sayfa" aria-label="Önceki Sayfa"><i class="fa-solid fa-chevron-left"></i></button>
-        <button class="paged-nav-btn" id="paged-next-btn" title="Sonraki Sayfa" aria-label="Sonraki Sayfa"><i class="fa-solid fa-chevron-right"></i></button>
+        <!-- Page Navigation Buttons (for Paged Mode): shown when the pointer reaches the strip beside the page -->
+        <div class="page-turn-zone prev"><button type="button" class="paged-nav-btn" id="paged-prev-btn" title="Önceki Sayfa" aria-label="Önceki Sayfa"><i class="fa-solid fa-chevron-left" aria-hidden="true"></i></button></div>
+        <div class="page-turn-zone next"><button type="button" class="paged-nav-btn" id="paged-next-btn" title="Sonraki Sayfa" aria-label="Sonraki Sayfa"><i class="fa-solid fa-chevron-right" aria-hidden="true"></i></button></div>
         
         <!-- Bottom Page Indicator (for Paged Mode) -->
         <button type="button" id="paged-indicator" class="glass-panel paged-indicator" title="Sayfaya Git (G)" aria-label="Sayfaya Git">

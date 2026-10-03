@@ -6,6 +6,7 @@ import { createUploadQueue, uploadHttp } from '/reader-core/upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from '/reader-core/pdf-outline.js';
 import { createPdfLayoutView, createPdfPage } from '/reader-core/pdf-layout-view.js';
 import { renderNativePdfBlocks } from '/reader-core/pdf-reader.js';
+import { installPageTurns } from '/reader-core/page-turn.js';
 import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor, readerTextAnchorShift, readerTextAnchorAt,
     readerTextAnchorWord, speechHighlight, speechHighlightColumn, watchSpeechHighlight, speechStartsContainer, speechPosition,
     speechPositionWord, speechRestarted, rangeWithin, wordOnScreen, firstVisibleWord, selectForSpeech } from '/reader-core/reader-link-history.js';
@@ -1599,20 +1600,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     pagedPrevBtn.addEventListener('click', goToPrevPage);
     pagedNextBtn.addEventListener('click', goToNextPage);
+    installPageTurns({
+        view: document.getElementById('reader-view'), viewport: bookViewport, content: bookContent,
+        isPaged: () => !!currentBookId && currentSettings.readingMode === 'paged' && !pdfLayoutView.isDragging,
+        turn: direction => direction > 0 ? goToNextPage() : goToPrevPage()
+    });
     bookViewport.addEventListener('click', event => {
         if (pdfLayoutView.isDragging || currentSettings.readingMode !== 'paged' ||
             event.target.closest('a,button,input,select,[role="separator"],.pdf-page-image-column,.reader-object-shell,.reader-object-dialog') || window.getSelection().toString()) return;
         const rect = bookViewport.getBoundingClientRect();
         const x = event.clientX - rect.left;
-        if (x < rect.width * 0.25) goToPrevPage();
-        else if (x > rect.width * 0.75) goToNextPage();
-        else {
-            const nav = document.getElementById('reader-nav');
-            const visible = nav.style.opacity === '1';
-            nav.style.opacity = visible ? '0' : '1';
-            nav.style.visibility = visible ? 'hidden' : 'visible';
-            nav.style.pointerEvents = visible ? 'none' : 'auto';
-        }
+        // Clicks and taps never turn pages; the middle of the page shows the top bar.
+        if (x < rect.width * 0.25 || x > rect.width * 0.75) return;
+        const nav = document.getElementById('reader-nav');
+        const visible = nav.style.opacity === '1';
+        nav.style.opacity = visible ? '0' : '1';
+        nav.style.visibility = visible ? 'hidden' : 'visible';
+        nav.style.pointerEvents = visible ? 'none' : 'auto';
     });
     window.addEventListener('keydown', event => {
         if (!currentBookId || pdfLayoutView.isDragging || pageJumpModal.open ||

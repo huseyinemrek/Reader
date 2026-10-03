@@ -1550,6 +1550,89 @@ for (const mode of ['local', 'vps', 'hosting']) {
             }
         });
 
+        await t.test('paged pages turn by swipes, sideways wheels and hover buttons, never by a click', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const shownPage = () => page.$eval('#paged-page-text', text => Number(/^Sayfa (\d+) \//.exec(text.textContent)?.[1]));
+            const showsPage = expected => page.waitForFunction(expected => Number(/^Sayfa (\d+) \//.exec(
+                document.getElementById('paged-page-text').textContent)?.[1]) === expected &&
+                !document.getElementById('page-jump-input').disabled, { timeout: 5000 }, expected);
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode: 'paged' })));
+                await page.goto(`${base}/book/book_test_epub?ch=1&local=1`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                const start = await shownPage();
+                const box = await page.$eval('#book-viewport', viewport => {
+                    const rect = viewport.getBoundingClientRect();
+                    const style = getComputedStyle(document.getElementById('book-content'));
+                    return { left: rect.left, right: rect.right, top: rect.top, width: rect.width, height: rect.height,
+                        textLeft: rect.left + parseFloat(style.paddingLeft), textRight: rect.right - parseFloat(style.paddingRight) };
+                });
+                const y = box.top + box.height / 2;
+                // Clicks where the page edges used to turn the page keep it.
+                for (const x of [box.textRight - 10, box.textLeft + 10]) {
+                    await page.mouse.click(x, y);
+                    await delay(300);
+                    assert.equal(await shownPage(), start, 'A click at the page edge keeps the page');
+                }
+
+                // The buttons stay hidden until the pointer reaches the strip beside the text.
+                const nextButton = () => page.$eval('#paged-next-btn', button =>
+                    ({ opacity: getComputedStyle(button).opacity, events: getComputedStyle(button).pointerEvents }));
+                assert.deepEqual(await nextButton(), { opacity: '0', events: 'none' });
+                const zones = await page.$$eval('.page-turn-zone', zones => zones.map(zone => {
+                    const rect = zone.getBoundingClientRect();
+                    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+                }));
+                // Edge Read Aloud hit-tests every word: no strip may cover the text.
+                assert.ok(zones[0].right <= box.textLeft && zones[1].left >= box.textRight, 'The strips end before the text');
+                await page.mouse.move((zones[1].left + zones[1].right) / 2, (zones[1].top + zones[1].bottom) / 2);
+                await page.waitForFunction(() => getComputedStyle(document.getElementById('paged-next-btn')).opacity === '1');
+                await page.click('#paged-next-btn');
+                await showsPage(start + 1);
+
+                // A sideways touchpad swipe turns one page per gesture.
+                await page.mouse.move(box.left + box.width / 2, y);
+                for (let event = 0; event < 6; event++) await page.mouse.wheel({ deltaX: 40 });
+                await showsPage(start + 2);
+                await delay(400);
+                assert.equal(await shownPage(), start + 2);
+
+                // A quick mouse flick turns back without selecting text or opening the top bar.
+                await page.mouse.move(box.left + box.width * 0.3, y);
+                await page.mouse.down();
+                await page.mouse.move(box.left + box.width * 0.7, y, { steps: 3 });
+                await page.mouse.up();
+                await showsPage(start + 1);
+                assert.equal(await page.evaluate(() => getSelection().toString()), '');
+                assert.notEqual(await page.$eval('#reader-nav', nav => nav.style.opacity), '1');
+
+                // A slow drag over the text selects it and keeps the page.
+                await page.mouse.move(box.left + box.width * 0.3, y);
+                await page.mouse.down();
+                for (let step = 1; step <= 5; step++) {
+                    await page.mouse.move(box.left + box.width * (0.3 + step * 0.06), y);
+                    await delay(100);
+                }
+                await page.mouse.up();
+                await delay(300);
+                assert.notEqual(await page.evaluate(() => getSelection().toString().trim()), '');
+                assert.equal(await shownPage(), start + 1);
+                await page.evaluate(() => getSelection().removeAllRanges());
+
+                // A finger swiping left turns to the next page.
+                await page.touchscreen.touchStart(box.left + box.width * 0.7, y);
+                await page.touchscreen.touchMove(box.left + box.width * 0.45, y + 6);
+                await page.touchscreen.touchMove(box.left + box.width * 0.25, y + 10);
+                await page.touchscreen.touchEnd();
+                await showsPage(start + 2);
+            } finally {
+                await page.evaluate(() => getSelection().removeAllRanges());
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+            }
+        });
+
         await t.test('every PDF layout renders real pages and split interactions retain reading position', async () => {
             await page.setViewport({ width: 1400, height: 960 });
             await openPdf(page, base);

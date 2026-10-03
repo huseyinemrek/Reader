@@ -1,0 +1,105 @@
+/* Paged mode page turns. The buttons stay hidden until the pointer reaches the strip
+   beside the page; page-turn.js ends each strip just before the text and centres the
+   button in the page's own margin when it has room. The strips stop short of the
+   corner buttons and of the link return button above them. */
+.page-turn-zone {
+    position: fixed;
+    top: 120px;
+    bottom: 160px;
+    z-index: 70;
+    display: none;
+    width: var(--page-turn-width, 64px);
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.page-turn-zone.prev {
+    left: var(--page-turn-offset, 0px);
+}
+
+.page-turn-zone.next {
+    right: var(--page-turn-offset, 0px);
+}
+
+#reader-view.paged-mode .page-turn-zone {
+    display: block;
+}
+
+.paged-nav-btn {
+    position: absolute;
+    top: clamp(0px, calc(50vh - 168px), calc(100% - 96px));
+    width: var(--page-turn-button, 44px);
+    height: 96px;
+    max-height: 100%;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--text-color) 22%, transparent);
+    background: color-mix(in srgb, var(--text-color) 10%, var(--container-bg));
+    color: var(--text-color);
+    font-size: 1.05rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.page-turn-zone.prev .paged-nav-btn {
+    left: calc(var(--page-turn-center, 32px) - var(--page-turn-button, 44px) / 2);
+    transform: translateX(-6px);
+}
+
+.page-turn-zone.next .paged-nav-btn {
+    right: calc(var(--page-turn-center, 32px) - var(--page-turn-button, 44px) / 2);
+    transform: translateX(6px);
+}
+
+.page-turn-zone:hover .paged-nav-btn,
+.paged-nav-btn:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+}
+
+.paged-nav-btn:hover:not(:disabled) {
+    color: var(--ui-primary);
+    border-color: color-mix(in srgb, var(--ui-primary) 55%, transparent);
+    background: color-mix(in srgb, var(--ui-primary) 18%, var(--container-bg));
+}
+
+.paged-nav-btn:active:not(:disabled) {
+    transform: scale(0.94);
+}
+
+.page-turn-zone:hover .paged-nav-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+/* Paged reading only pans vertically itself: sideways swipes turn pages. */
+#reader-view.paged-mode #reader-container,
+#reader-view.paged-mode #book-content {
+    touch-action: pan-y pinch-zoom;
+}
+
+/* A sideways touchpad swipe turns a page instead of going back in history. */
+html:has(#reader-view.paged-mode),
+body:has(#reader-view.paged-mode) {
+    overscroll-behavior-x: none;
+}
+
+/* Touch screens have no hover to reveal the buttons; they swipe. */
+@media (hover: none) {
+    #reader-view.paged-mode .page-turn-zone {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .paged-nav-btn {
+        transition: none;
+    }
+}

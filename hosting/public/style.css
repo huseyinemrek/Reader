@@ -245,7 +245,6 @@ body:has(#reader-view.paged-mode)::-webkit-scrollbar,
     scroll-behavior: auto;
     scrollbar-width: none;
     transition: background-color 0.4s ease;
-    cursor: pointer;
 }
 
 #reader-view.paged-mode #book-content {
@@ -307,53 +306,6 @@ body:has(#reader-view.paged-mode)::-webkit-scrollbar,
 
 #reader-view.paged-mode #book-content p {
     break-inside: auto;
-}
-
-/* Navigation Buttons for Paged Mode */
-.paged-nav-btn {
-    position: fixed;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    background: var(--ui-bg);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid var(--ui-border);
-    color: var(--ui-text);
-    font-size: 1.3rem;
-    cursor: pointer;
-    z-index: 70;
-    display: none;
-    justify-content: center;
-    align-items: center;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    transition: transform 0.2s, background 0.2s, opacity 0.2s, color 0.2s;
-    opacity: 0.75;
-}
-
-.paged-nav-btn:hover {
-    opacity: 1;
-    transform: translateY(-50%) scale(1.1);
-    background: rgba(255, 255, 255, 0.18);
-    color: var(--ui-primary);
-}
-
-.paged-nav-btn:active {
-    transform: translateY(-50%) scale(0.95);
-}
-
-#paged-prev-btn {
-    left: 20px;
-}
-
-#paged-next-btn {
-    right: 20px;
-}
-
-#reader-view.paged-mode .paged-nav-btn {
-    display: flex;
 }
 
 /* Page Indicator Badge */
