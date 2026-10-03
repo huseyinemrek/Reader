@@ -218,6 +218,61 @@ function visiblePassage() {
     throw new Error('No source passage is visible on the current page');
 }
 
+// Edge Read Aloud marks the spoken word with an msreadoutspan and normalizes the text
+// again when the mark moves on. Replace any previous mark in the same task, as Edge does.
+function speakWord({ selector, word = 0, scroll = false } = {}) {
+    document.querySelectorAll('msreadoutspan').forEach(span => {
+        const parent = span.parentNode;
+        span.replaceWith(...span.childNodes);
+        parent.normalize();
+    });
+    if (!selector) return null;
+    const walker = document.createTreeWalker(document.querySelector(selector), NodeFilter.SHOW_TEXT);
+    let count = 0;
+    for (let node; (node = walker.nextNode());) {
+        if (node.parentElement.closest('style, script, [data-reader-ui]')) continue;
+        for (const match of node.textContent.matchAll(/\S+/g)) {
+            if (count++ < word) continue;
+            const range = document.createRange();
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            const span = document.createElement('msreadoutspan');
+            span.className = 'msreadout-word-highlight';
+            range.surroundContents(span);
+            if (scroll) span.scrollIntoView({ block: 'center' });
+            return span.textContent;
+        }
+    }
+    throw new Error('No word to mark in ' + selector);
+}
+
+// Whether the selection is the first word of the first fully visible book line.
+function selectionStartsView() {
+    const selection = getSelection();
+    if (!selection.rangeCount || selection.isCollapsed) return { selected: '' };
+    const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+    const paged = document.getElementById('reader-view').classList.contains('paged-mode');
+    const top = paged ? viewport.top : 0;
+    const bottom = paged ? viewport.bottom : innerHeight;
+    const shown = rect => rect.width > 0 && rect.left >= viewport.left - 1 && rect.right <= viewport.right + 1 &&
+        rect.top >= top - 1 && rect.bottom <= bottom + 1;
+    const selected = selection.getRangeAt(0).getBoundingClientRect();
+    const range = document.createRange();
+    const walker = document.createTreeWalker(document.getElementById('book-content'), NodeFilter.SHOW_TEXT);
+    let first = null;
+    for (let node; (node = walker.nextNode());) {
+        if (node.parentElement.closest('style, script, [data-reader-ui]')) continue;
+        for (const match of node.textContent.matchAll(/\S+/g)) {
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            const rect = range.getBoundingClientRect();
+            if (shown(rect) && (!first || rect.top < first.top - 1 || (Math.abs(rect.top - first.top) <= 1 && rect.left < first.left))) first = rect;
+        }
+    }
+    return { selected: selection.toString(), inView: shown(selected),
+        first: !!first && Math.abs(first.top - selected.top) <= 1 && Math.abs(first.left - selected.left) <= 1 };
+}
+
 async function visibleIllustration(page, name, rgb) {
     await page.waitForFunction(({ name, rgb }) => {
         const image = document.querySelector(`img[alt="${name} illustration"]`);
@@ -1050,6 +1105,14 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await page.click('#mode-scroll-btn');
             await page.click('#settings-close');
             await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-sidebar')).visibility === 'hidden');
+            // Edge Read Aloud hit-tests the spoken word and scrolls a covered word back to the centre.
+            assert.equal(await page.$eval('#First-20', paragraph => {
+                window.scrollTo({ top: paragraph.getBoundingClientRect().top + window.scrollY - 20, behavior: 'instant' });
+                const range = document.createRange();
+                range.selectNodeContents(paragraph);
+                const line = range.getClientRects()[0];
+                return paragraph.contains(document.elementFromPoint(line.left + line.width / 2, line.top + line.height / 2));
+            }), true, 'No transparent control covers text near the top edge in scroll mode');
             await page.$eval('#First-20', paragraph => window.scrollTo({
                 top: paragraph.getBoundingClientRect().top + window.scrollY - 100, behavior: 'instant'
             }));
@@ -1085,12 +1148,50 @@ for (const mode of ['local', 'vps', 'hosting']) {
             const initial = await page.evaluate(visiblePassage);
             assert.equal(initial.chapter, 'First');
             assert.ok(initial.index > 10, 'The position fixture must be well beyond the beginning');
+            // Edge Read Aloud keeps references to the mounted text and wraps the spoken
+            // word in an msreadoutspan; mark the last word on this page the same way.
+            await page.evaluate(() => {
+                const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+                const walker = document.createTreeWalker(document.getElementById('book-content'), NodeFilter.SHOW_TEXT);
+                const range = document.createRange();
+                let last = null;
+                for (let node; (node = walker.nextNode());) {
+                    if (!node.parentElement.closest('p[id]')) continue;
+                    for (const match of node.textContent.matchAll(/\S+/g)) {
+                        range.setStart(node, match.index);
+                        range.setEnd(node, match.index + match[0].length);
+                        const rect = range.getBoundingClientRect();
+                        if (rect.width > 0 && rect.left >= viewport.left && rect.right <= viewport.right) {
+                            last = { node, start: match.index, end: match.index + match[0].length };
+                        }
+                    }
+                }
+                range.setStart(last.node, last.start);
+                range.setEnd(last.node, last.end);
+                const word = document.createElement('msreadoutspan');
+                word.className = 'msreadout-word-highlight';
+                range.surroundContents(word);
+                window.readerTestSection = document.querySelector('#book-content > section');
+            });
             await page.setViewport({ width: 600, height: 960 });
             await page.waitForFunction(total => {
                 const input = document.getElementById('page-jump-input');
                 return !input.disabled && Number(input.max) !== total;
             }, { timeout: 30000 }, total);
             await waitForPages(page);
+            assert.equal(await page.evaluate(() => {
+                const word = document.querySelector('.msreadout-word-highlight');
+                const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+                const rect = word?.getBoundingClientRect();
+                return document.querySelector('#book-content > section') === window.readerTestSection &&
+                    rect?.left >= viewport.left && rect.right <= viewport.right;
+            }), true, 'Resizing reflows the mounted text in place and keeps the spoken word on screen');
+            await page.evaluate(() => {
+                const word = document.querySelector('.msreadout-word-highlight');
+                const parent = word.parentNode;
+                word.replaceWith(...word.childNodes);
+                parent.normalize();
+            });
             const resized = await page.evaluate(visiblePassage);
             assert.equal(resized.chapter, initial.chapter);
             assert.ok(Math.abs(resized.index - initial.index) <= 8, 'Resizing must retain the source passage, not reset to the beginning');
@@ -1148,6 +1249,138 @@ for (const mode of ['local', 'vps', 'hosting']) {
             await page.click('#page-jump-close');
             await page.setViewport({ width: 1400, height: 960 });
             await waitForPages(page);
+        });
+
+        await t.test('Edge Read Aloud keeps its page and the next one mounted while the reader scrolls away', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const loaded = index => page.$eval(`#book-content > section[data-index="${index}"]`, section => section.dataset.loaded)
+                .catch(() => 'missing');
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode: 'scroll' })));
+                await openPdf(page, base, 'book_test_typography', 1);
+                await page.waitForFunction(() => !document.getElementById('page-jump-input').disabled);
+                const mounted = await page.$$eval('#book-content > section', sections =>
+                    sections.filter(section => section.dataset.loaded === 'true').map(section => Number(section.dataset.index)));
+                const last = Math.max(...mounted);
+                assert.ok(last < 3, 'The scroll window must leave a later page unmounted for this check');
+                // Edge reads the last mounted page: the page after it must be mounted for Edge to continue.
+                await page.evaluate(speakWord, { selector: `#book-content > section[data-index="${last}"] .pdf-page-text`, word: 3 });
+                await page.waitForFunction(index => document.querySelector(`#book-content > section[data-index="${index}"]`)
+                    ?.dataset.loaded === 'true', { timeout: 10000 }, last + 1);
+
+                await page.evaluate(speakWord, { selector: '#book-content > section[data-index="0"] .pdf-page-text', word: 3 });
+                // Later pages mount while scrolling, so keep going until the end stays put.
+                let previous = -1;
+                for (let attempt = 0; attempt < 20; attempt++) {
+                    const y = await page.evaluate(() => {
+                        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+                        return Math.round(window.scrollY);
+                    });
+                    await delay(300);
+                    if (y === previous) break;
+                    previous = y;
+                }
+                assert.ok(await page.evaluate(() => Number([...document.querySelectorAll('#book-content > section')]
+                    .find(section => section.getBoundingClientRect().bottom > 100)?.dataset.index) >= 2),
+                'The reader must be two pages past the spoken one for this check');
+                await delay(600);
+                assert.equal(await loaded(0), 'true', 'The page Edge reads stays mounted after scrolling two pages away');
+                assert.equal(await loaded(1), 'true', 'The page after the spoken one stays mounted');
+
+                // When Edge moves on, the protection follows it and releases the earlier page.
+                await page.evaluate(speakWord, { selector: '#book-content > section[data-index="2"] .pdf-page-text', word: 3 });
+                await page.waitForFunction(() => document.querySelector('#book-content > section[data-index="0"]')
+                    ?.dataset.loaded === 'false', { timeout: 10000 });
+            } finally {
+                await page.evaluate(speakWord, {});
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+            }
+        });
+
+        await t.test('Edge Read Aloud default start moves to the first visible line, other starts stay put', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const noSelection = async () => {
+                await delay(800);
+                return page.evaluate(() => getSelection().toString());
+            };
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode: 'scroll' })));
+                await page.goto(`${base}/book/book_test_epub?ch=1&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                await page.waitForFunction(() => document.querySelector('#book-content > section[data-index="0"]')?.dataset.loaded === 'true');
+                await page.$eval('#Later-30', paragraph => window.scrollTo({
+                    top: paragraph.getBoundingClientRect().top + window.scrollY - 120, behavior: 'instant' }));
+                await delay(700);
+                const userY = await page.evaluate(() => Math.round(window.scrollY));
+                // Ctrl+Shift+U: Edge marks the first word of the first mounted chapter and scrolls to it.
+                await page.evaluate(speakWord, { selector: '#book-content > section[data-index="0"]', scroll: true });
+                await page.waitForFunction(() => getSelection().toString().trim().length > 0, { timeout: 5000 });
+                const redirected = await page.evaluate(selectionStartsView);
+                assert.ok(Math.abs(await page.evaluate(() => window.scrollY) - userY) <= 3, 'The reader returns to the passage it showed');
+                assert.equal(redirected.inView, true);
+                assert.equal(redirected.first, true, 'Reading moves to the first word of the first fully visible line');
+                assert.match(redirected.selected, /^\S+$/);
+
+                await page.evaluate(() => getSelection().removeAllRanges());
+                await page.evaluate(speakWord, {});
+                await delay(100);
+                // A right-click start on the visible passage is a new start but not Edge's default point.
+                await page.evaluate(speakWord, { selector: '#Later-32', word: 2 });
+                assert.equal(await noSelection(), '');
+                // Edge's own paragraph buttons move an existing highlight; they never restart it.
+                await page.evaluate(speakWord, { selector: '#book-content > section[data-index="0"]' });
+                assert.equal(await noSelection(), '');
+                assert.ok(Math.abs(await page.evaluate(() => window.scrollY) - userY) <= 3);
+            } finally {
+                await page.evaluate(() => getSelection().removeAllRanges());
+                await page.evaluate(speakWord, {});
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+            }
+        });
+
+        await t.test('Edge Read Aloud page-chrome start moves into the page and its page turns snap to the grid', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const shownPage = () => page.$eval('#paged-page-text', text => Number(/^Sayfa (\d+) \//.exec(text.textContent)?.[1]));
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode: 'paged' })));
+                await page.goto(`${base}/book/book_test_epub?ch=0&local=2`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                const left = await page.$eval('#book-viewport', viewport => viewport.scrollLeft);
+                // Edge skips the paged viewport and starts with the page indicator before the book.
+                await page.evaluate(speakWord, { selector: '#paged-page-text' });
+                await page.waitForFunction(() => getSelection().toString().trim().length > 0, { timeout: 5000 });
+                const redirected = await page.evaluate(selectionStartsView);
+                assert.equal(redirected.inView, true, 'Reading moves into the page on screen');
+                assert.equal(redirected.first, true);
+                assert.equal(await page.$eval('#book-viewport', viewport => viewport.scrollLeft), left);
+                await page.evaluate(() => getSelection().removeAllRanges());
+                await page.evaluate(speakWord, {});
+
+                // Edge turns the page by aligning the next word with the viewport edge.
+                const before = await shownPage();
+                assert.ok(before > 1);
+                await page.evaluate(() => {
+                    const viewport = document.getElementById('book-viewport');
+                    viewport.scrollLeft = (Math.round(viewport.scrollLeft / viewport.clientWidth) + 1) * viewport.clientWidth + 80;
+                });
+                await page.waitForFunction(() => {
+                    const viewport = document.getElementById('book-viewport');
+                    return viewport.scrollLeft % viewport.clientWidth === 0;
+                }, { timeout: 5000 });
+                assert.equal(await shownPage(), before + 1, 'The page number follows the page Edge turned to');
+                await page.waitForFunction(expected => Number(new URL(location.href).searchParams.get('page')) === expected,
+                    { timeout: 5000 }, before + 1);
+            } finally {
+                await page.evaluate(() => getSelection().removeAllRanges());
+                await page.evaluate(speakWord, {});
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+            }
         });
 
         await t.test('every PDF layout renders real pages and split interactions retain reading position', async () => {

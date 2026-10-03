@@ -6,7 +6,8 @@ import { createUploadQueue, uploadHttp } from '/reader-core/upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from '/reader-core/pdf-outline.js';
 import { createPdfLayoutView, createPdfPage } from '/reader-core/pdf-layout-view.js';
 import { renderNativePdfBlocks } from '/reader-core/pdf-reader.js';
-import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor } from '/reader-core/reader-link-history.js';
+import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor, readerTextAnchorShift, speechHighlight,
+    speechHighlightColumn, watchSpeechHighlight, speechStartsContainer, firstVisibleWord, selectForSpeech } from '/reader-core/reader-link-history.js';
 
 // --- Firebase Auth Entegrasyonu (Dinamik ve Sıfır Kod Düzenleme) ---
 let auth = null;
@@ -216,6 +217,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     let epubPagination = createEpubPagination();
     let layoutTimer = null;
     let layoutPosition = null;
+    let layoutGeneration = 0;
+    let settledPosition = null;
+    let settleTimer = null;
+    let speechSection = null;
+    let scrollWindowAgain = false;
+    let pagedAlignTimer = null;
     let resourceBase = '';
     let htmlSource = '';
     let pendingProgress = null;
@@ -913,6 +920,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         flushProgress();
         clearTimeout(scrollSaveTimeout);
         clearTimeout(layoutTimer);
+        clearTimeout(settleTimer);
+        clearTimeout(pagedAlignTimer);
         session++;
         sessionAbort.abort();
         paginationAbort.abort();
@@ -954,7 +963,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         isNavigatingPage = scrollWindowBusy = false;
         layoutKey = '';
         epubPagination = createEpubPagination();
-        layoutPosition = null;
+        layoutPosition = settledPosition = speechSection = null;
+        scrollWindowAgain = false;
     }
 
     function closeReader() {
@@ -1099,22 +1109,34 @@ document.addEventListener('DOMContentLoaded', async () => {
             anchor: captureReaderTextAnchor(section.querySelector('.pdf-page-text') || section, bookViewport, paged) };
     }
 
-    async function restoreLinkPosition(position) {
+    async function restoreLinkPosition(position, {followSpeech = false} = {}) {
         if (position.bookId !== currentBookId) return false;
         return navigate(async () => {
             const count = currentBookType === 'epub' ? epubSpine[position.chapterIndex].pageCount : totalBookPages;
-            const local = currentBookType === 'pdf' || (position.layoutKey === layoutKey && position.readingMode === currentSettings.readingMode)
-                ? position.localPage : Math.min(count - 1, Math.floor(position.scrollRatio * count));
-            await showLocation(position.chapterIndex, local, position.scrollRatio);
             const index = currentBookType === 'pdf' ? position.localPage : position.chapterIndex;
-            const section = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
+            const paged = currentSettings.readingMode === 'paged';
+            let section = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
+            // Reflow mounted text in place: speech tools such as Edge Read Aloud hold
+            // its nodes and stop, losing their place, when it is rendered again.
+            const mounted = currentBookType !== 'pdf' && section && section.dataset.loaded !== 'false' &&
+                (!paged || bookContent.children.length === 1);
+            if (mounted) {
+                if (paged) window.scrollTo({top: 0, behavior: 'instant'});
+            } else {
+                const local = currentBookType === 'pdf' || (position.layoutKey === layoutKey && position.readingMode === currentSettings.readingMode)
+                    ? position.localPage : Math.min(count - 1, Math.floor(position.scrollRatio * count));
+                await showLocation(position.chapterIndex, local, position.scrollRatio);
+                section = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
+            }
             await pdfPageStates.get(section)?.hydration;
             if (!section?.isConnected || position.bookId !== currentBookId) return;
             await settleContent(section);
-            const paged = currentSettings.readingMode === 'paged';
-            const page = restoreReaderTextAnchor(section.querySelector('.pdf-page-text') || section,
-                bookViewport, paged, paged && currentBookType !== 'pdf', position.anchor);
+            const columned = paged && currentBookType !== 'pdf';
+            const spoken = followSpeech && columned ? speechHighlightColumn(section, bookViewport) : null;
+            const page = spoken ?? restoreReaderTextAnchor(section.querySelector('.pdf-page-text') || section,
+                bookViewport, paged, columned, position.anchor);
             if (page !== null) { localPagedIndex = page; updatePagedView(); }
+            else if (mounted && paged) updatePagedView();
             else if (!paged && currentBookType !== 'pdf') {
                 const ratio = Math.max(0, Math.min(0.999999, (80 - section.getBoundingClientRect().top) / Math.max(1, section.offsetHeight)));
                 localPagedIndex = Math.floor(ratio * count);
@@ -1154,6 +1176,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         pendingProgress = captureProgress();
         clearTimeout(scrollSaveTimeout);
         scrollSaveTimeout = setTimeout(flushProgress, 400);
+        // Until the new position settles, a resize measures the current text instead.
+        settledPosition = null;
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(rememberSettledPosition, 150);
+    }
+
+    // A resize event already reports the new geometry, so the text read before it
+    // must be measured while the previous layout was still on screen.
+    function rememberSettledPosition() {
+        if (currentBookType === 'pdf' || layoutPosition || getLayoutKey() !== layoutKey) return;
+        settledPosition = captureLinkPosition();
     }
     window.addEventListener('pagehide', flushProgress);
     bookContent.addEventListener('scroll', event => {
@@ -1387,7 +1420,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Keep only the visible scroll chapter and its neighbours hydrated. Empty
     // placeholders preserve scroll offsets and are rehydrated when revisited.
     async function updateScrollWindow() {
-        if (scrollWindowBusy || isNavigatingPage || pdfLayoutView.isDragging || currentSettings.readingMode !== 'scroll' || !['epub', 'pdf'].includes(currentBookType)) return;
+        // A request made while busy (a scroll or Edge entering another section) runs afterwards.
+        if (scrollWindowBusy) {
+            scrollWindowAgain = true;
+            return;
+        }
+        if (isNavigatingPage || pdfLayoutView.isDragging || currentSettings.readingMode !== 'scroll' || !['epub', 'pdf'].includes(currentBookType)) return;
         scrollWindowBusy = true;
         const token = session;
         const location = locationVersion;
@@ -1402,32 +1440,42 @@ document.addEventListener('DOMContentLoaded', async () => {
             const length = isEpub ? epubSpine.length : totalPdfPages;
             const start = Math.max(0, index - 1);
             let end = Math.min(length - 1, index + 1);
-            for (let i = start; i <= end; i++) {
+            // Edge Read Aloud reads on from its section into the next one even after
+            // the reader scrolls away, so both stay mounted while it speaks.
+            const spoken = speechHighlight(bookContent)?.closest('#book-content > section');
+            const speaking = spoken ? [Number(spoken.dataset.index), Number(spoken.dataset.index) + 1].filter(i => i < length) : [];
+            const hydrate = async i => {
                 let section = bookContent.querySelector(':scope > section[data-index="' + i + '"]');
-                if (!section || section.dataset.loaded !== 'true') {
-                    let fresh;
-                    if (isEpub) fresh = await loadEpubChapter(i);
-                    else fresh = createPdfPageSection(i + 1);
-                    if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll') return;
-                    const anchor = active.getBoundingClientRect().top;
-                    if (section) disposePdfPage(section);
-                    if (section) section.replaceWith(fresh);
-                    else {
-                        const after = Array.from(bookContent.children).find(el => Number(el.dataset.index) > i);
-                        bookContent.insertBefore(fresh, after || null);
-                    }
-                    section = fresh;
-                    if (!isEpub) mountPdfPage(section);
-                    if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - anchor, behavior: 'instant'});
-                    await settleContent(section);
-                    if (token !== session || location !== locationVersion) return;
+                if (section?.dataset.loaded === 'true') return section;
+                let fresh;
+                if (isEpub) fresh = await loadEpubChapter(i);
+                else fresh = createPdfPageSection(i + 1);
+                if (token !== session || location !== locationVersion || currentSettings.readingMode !== 'scroll') return null;
+                const anchor = active.getBoundingClientRect().top;
+                if (section) disposePdfPage(section);
+                if (section) section.replaceWith(fresh);
+                else {
+                    const after = Array.from(bookContent.children).find(el => Number(el.dataset.index) > i);
+                    bookContent.insertBefore(fresh, after || null);
                 }
+                section = fresh;
+                if (!isEpub) mountPdfPage(section);
+                if (active.isConnected) window.scrollBy({top: active.getBoundingClientRect().top - anchor, behavior: 'instant'});
+                await settleContent(section);
+                return token === session && location === locationVersion ? section : null;
+            };
+            for (let i = start; i <= end; i++) {
+                const section = await hydrate(i);
+                if (!section) return;
                 // Short sections at the viewport end need a following chapter to leave room to scroll.
                 if (i === end && end < length - 1 && section.getBoundingClientRect().bottom < innerHeight + 200) end++;
             }
+            for (const i of speaking) {
+                if ((i < start || i > end) && !await hydrate(i)) return;
+            }
             for (const element of bookContent.children) {
                 const elementIndex = Number(element.dataset.index);
-                if ((elementIndex >= start && elementIndex <= end) || element.dataset.loaded !== 'true') continue;
+                if ((elementIndex >= start && elementIndex <= end) || speaking.includes(elementIndex) || element.dataset.loaded !== 'true') continue;
                 const height = element.getBoundingClientRect().height;
                 if (ttsActive) stopTTS();
                 disposePdfPage(element);
@@ -1443,12 +1491,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             loadVisibleAssets();
         } catch (error) {
             if (error.name !== 'AbortError') console.error(error);
-        } finally {if (token === session) scrollWindowBusy = false;}
+        } finally {
+            if (token === session) {
+                scrollWindowBusy = false;
+                if (scrollWindowAgain) {
+                    scrollWindowAgain = false;
+                    void updateScrollWindow();
+                }
+            }
+        }
     }
 
-    window.addEventListener('scroll', () => {
-        loadVisibleAssets();
-        if (!currentBookId || currentSettings.readingMode !== 'scroll' || isNavigatingPage) return;
+    function syncScrollPage() {
         if (currentBookType === 'epub' || currentBookType === 'pdf') updateScrollWindow();
         else if (currentBookType === 'html') {
             const max = document.documentElement.scrollHeight - innerHeight;
@@ -1456,6 +1510,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             updatePagedIndicator();
             saveCurrentProgress();
         }
+    }
+
+    window.addEventListener('scroll', () => {
+        loadVisibleAssets();
+        if (!currentBookId || currentSettings.readingMode !== 'scroll' || isNavigatingPage) return;
+        syncScrollPage();
     }, {passive: true});
 
     function openPageJumpModal() {
@@ -1529,24 +1589,41 @@ document.addEventListener('DOMContentLoaded', async () => {
             restorePdfReadingAnchor(anchor);
             return;
         }
-        if (!currentBookId || getLayoutKey() === layoutKey) return;
-        layoutPosition ||= captureLinkPosition();
-        const token = session;
+        // A pending reflow must also follow a resize back to the counted layout.
+        if (!currentBookId || (getLayoutKey() === layoutKey && !layoutPosition)) return;
+        clearTimeout(settleTimer);
+        const settled = settledPosition?.bookId === currentBookId &&
+            settledPosition.readingMode === currentSettings.readingMode ? settledPosition : null;
+        layoutPosition ||= settled || captureLinkPosition();
         paginationAbort.abort();
         totalBookPages = 0;
         updatePagedIndicator();
         clearTimeout(layoutTimer);
-        layoutTimer = setTimeout(async () => {
-            try {
-                await startPagination();
-                if (token !== session) return;
-                const position = layoutPosition;
-                layoutPosition = null;
-                if (position && currentBookId) {
-                    await restoreLinkPosition(position);
-                }
-            } catch (error) {if (error.name !== 'AbortError') console.error(error);}
-        }, 180);
+        layoutTimer = setTimeout(reflowBook, 180, session, ++layoutGeneration);
+    }
+
+    // Reflow the mounted text first; the page map is then counted off-screen and
+    // only renumbers the position, so the visible text is never rendered again.
+    async function reflowBook(token, generation) {
+        try {
+            if (token !== session) return;
+            if (isNavigatingPage) {
+                layoutTimer = setTimeout(reflowBook, 180, token, generation);
+                return;
+            }
+            const position = layoutPosition;
+            if (position && currentBookId) await restoreLinkPosition(position, {followSpeech: true});
+            // A later geometry change keeps the remembered text and reflows again.
+            if (token !== session || generation !== layoutGeneration) return;
+            layoutPosition = null;
+            await startPagination();
+            if (token !== session || generation !== layoutGeneration) return;
+            if (currentSettings.readingMode === 'scroll') syncScrollPage();
+            else {
+                updatePagedIndicator();
+                saveCurrentProgress();
+            }
+        } catch (error) {if (error.name !== 'AbortError') console.error(error);}
     }
     window.addEventListener('resize', scheduleRepagination);
     document.fonts.addEventListener('loadingdone', () => {
@@ -2006,12 +2083,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             fraction: Math.max(0, Math.min(1, (point - rect.top) / Math.max(1, rect.height)))};
     }
 
-    function restorePdfReadingAnchor(anchor) {
-        if (!anchor?.section.isConnected) return;
+    function pdfAnchorShift(anchor) {
+        if (!anchor?.section.isConnected) return null;
         const node = anchor.node.isConnected ? anchor.node
             : anchor.section.querySelector('.pdf-page-text')?.children[anchor.index] || anchor.section;
         const rect = node.getBoundingClientRect();
-        const delta = rect.top + anchor.fraction * rect.height - anchor.point;
+        return rect.top + anchor.fraction * rect.height - anchor.point;
+    }
+
+    function restorePdfReadingAnchor(anchor) {
+        const delta = pdfAnchorShift(anchor);
+        if (delta === null) return;
         if (currentSettings.readingMode === 'paged') bookViewport.scrollBy({top: delta, behavior: 'instant'});
         else window.scrollBy({top: delta, behavior: 'instant'});
         pdfReadingAnchor = capturePdfReadingAnchor();
@@ -2022,6 +2104,105 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
     window.addEventListener('scroll', rememberPdfReadingAnchor, {passive: true});
     bookViewport.addEventListener('scroll', rememberPdfReadingAnchor, {passive: true});
+
+    // Edge Read Aloud turns pages itself by aligning the spoken word with the
+    // viewport edge (e.g. 980 instead of 900). When a horizontal scroll ends, snap
+    // back to the page grid and adopt that page; the reader's own turns are aligned.
+    function alignPagedScroll() {
+        clearTimeout(pagedAlignTimer);
+        if (!currentBookId || currentBookType === 'pdf' || currentSettings.readingMode !== 'paged' ||
+            isNavigatingPage || layoutPosition) return;
+        const width = bookViewport.clientWidth;
+        if (!width) return;
+        const page = Math.round(bookViewport.scrollLeft / width);
+        if (Math.abs(bookViewport.scrollLeft - page * width) > 1) bookViewport.scrollTo({left: page * width, behavior: 'instant'});
+        if (page === localPagedIndex) return;
+        localPagedIndex = page;
+        updatePagedIndicator();
+        saveCurrentProgress();
+        loadVisibleAssets();
+    }
+    bookViewport.addEventListener('scroll', event => {
+        if (event.target !== bookViewport || currentBookType === 'pdf') return;
+        clearTimeout(pagedAlignTimer);
+        pagedAlignTimer = setTimeout(alignPagedScroll, 250);
+    }, {passive: true});
+    bookViewport.addEventListener('scrollend', event => {
+        if (event.target === bookViewport) alignPagedScroll();
+    });
+
+    // Ctrl+Shift+U starts Edge Read Aloud at its default point: the first loaded
+    // text, or reader chrome before the book when Edge skips the paged viewport.
+    // Reading begun anywhere else (right click, Edge's own buttons) is left alone.
+    function isDefaultSpeechStart(highlight) {
+        if (!bookContent.contains(highlight)) {
+            return !!(highlight.compareDocumentPosition(bookContent) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }
+        const first = Array.from(bookContent.children).find(section => section.dataset.loaded !== 'false');
+        return !!first?.contains(highlight) && speechStartsContainer(first, highlight,
+            node => currentBookType !== 'pdf' || !!node.parentElement.closest('.pdf-page-text'));
+    }
+
+    function readerViewBounds(paged) {
+        const rect = bookViewport.getBoundingClientRect();
+        return paged ? {left: rect.left, right: rect.right, top: Math.max(0, rect.top), bottom: Math.min(innerHeight, rect.bottom)}
+            : {left: Math.max(0, rect.left), right: Math.min(innerWidth, rect.right), top: 0, bottom: innerHeight};
+    }
+
+    // Move a default start to the first fully visible word of the reader's own view.
+    // Edge has already scrolled to its start, so that view is restored first; Edge
+    // then moves to a selection made while it plays and clears the selection.
+    function redirectSpeechStart(attempt = 0) {
+        const highlight = speechHighlight(document);
+        if (!currentBookId || !highlight) return;
+        if (isNavigatingPage) {
+            if (attempt < 15) setTimeout(redirectSpeechStart, 200, attempt + 1);
+            return;
+        }
+        const paged = currentSettings.readingMode === 'paged';
+        const bounds = readerViewBounds(paged);
+        const shownAfter = shift => {
+            const rect = highlight.getBoundingClientRect();
+            return bookContent.contains(highlight) && rect.bottom - shift > bounds.top && rect.top - shift < bounds.bottom;
+        };
+        let roots;
+        if (currentBookType === 'pdf') {
+            const anchor = pdfReadingAnchor;
+            const shift = pdfAnchorShift(anchor);
+            if (shift === null || shownAfter(shift)) return;
+            restorePdfReadingAnchor(anchor);
+            roots = Array.from(bookContent.querySelectorAll(paged
+                ? '.pdf-page[data-page-index="' + currentPdfPage + '"] .pdf-page-text' : ':scope > section .pdf-page-text'));
+        } else if (paged) {
+            const section = bookContent.querySelector(':scope > section[data-index="' + currentChapterIndex + '"]');
+            if (!section || (bookContent.contains(highlight) && speechHighlightColumn(section, bookViewport) === localPagedIndex)) return;
+            // Leave the page indicator text alone: Edge may be reading it right now.
+            const left = localPagedIndex * bookViewport.clientWidth;
+            if (Math.abs(bookViewport.scrollLeft - left) > 1) bookViewport.scrollTo({left, behavior: 'instant'});
+            roots = [section];
+        } else {
+            const user = [layoutPosition, settledPosition].find(position =>
+                position?.bookId === currentBookId && position.readingMode === 'scroll');
+            const section = user && bookContent.querySelector(':scope > section[data-index="' + user.chapterIndex + '"]');
+            if (!section || section.dataset.loaded === 'false') return;
+            const shift = readerTextAnchorShift(section, bookViewport, false, user.anchor);
+            if (shift === null || shownAfter(shift)) return;
+            restoreReaderTextAnchor(section, bookViewport, false, false, user.anchor);
+            roots = Array.from(bookContent.children).filter(element => element.dataset.loaded !== 'false');
+        }
+        const word = firstVisibleWord(roots, readerViewBounds(paged));
+        if (word) selectForSpeech(word);
+    }
+
+    watchSpeechHighlight(document, (highlight, started) => {
+        if (!currentBookId) return;
+        if (started && isDefaultSpeechStart(highlight)) redirectSpeechStart();
+        const section = highlight.closest('#book-content > section');
+        if (section === speechSection) return;
+        speechSection = section;
+        // Mount the section after the one Edge now reads, even off screen.
+        if (section && currentSettings.readingMode === 'scroll') void updateScrollWindow();
+    });
 
     function disposePdfPage(section) {
         const state = pdfPageStates.get(section);

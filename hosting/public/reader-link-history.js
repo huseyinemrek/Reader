@@ -107,22 +107,115 @@ export function captureReaderTextAnchor(root, viewport, paged) {
     return null;
 }
 
-export function restoreReaderTextAnchor(root, viewport, paged, columned, anchor) {
-    if (!root || !anchor) return null;
+function columnOf(rect, viewport) {
+    return Math.max(0, Math.floor((rect.left - viewport.getBoundingClientRect().left + viewport.scrollLeft) / viewport.clientWidth));
+}
+
+// Edge Read Aloud wraps the spoken word and line in msreadout-* spans. While it
+// speaks (or is paused), that word is the reading position, not the page start.
+export function speechHighlight(root) {
+    return root?.querySelector('.msreadout-word-highlight') || root?.querySelector('.msreadout-line-highlight') || null;
+}
+
+export function speechHighlightColumn(root, viewport) {
+    const spoken = speechHighlight(root);
+    return spoken ? columnOf(spoken.getBoundingClientRect(), viewport) : null;
+}
+
+// Edge exposes no events, so its highlight spans are the only signal. `started`
+// marks the first highlight after none was shown: a new Read Aloud start rather
+// than the next word, a pause or Edge's previous/next paragraph buttons.
+export function watchSpeechHighlight(document, onHighlight) {
+    let shown = false;
+    const observer = new document.defaultView.MutationObserver(() => {
+        const highlight = speechHighlight(document);
+        const started = !!highlight && !shown;
+        shown = !!highlight;
+        if (highlight) onHighlight(highlight, started);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+}
+
+// True when no book text precedes the highlight inside container, i.e. Edge began
+// at the container's first readable text instead of a point the reader chose.
+export function speechStartsContainer(container, highlight, isBookText = () => true) {
+    const walker = container.ownerDocument.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    for (let node; (node = walker.nextNode());) {
+        if (highlight.contains(node)) return true;
+        if (node.textContent.trim() && !node.parentElement.closest('style, script, [data-reader-ui]') && isBookText(node)) return false;
+    }
+    return false;
+}
+
+// The first word whose box is fully inside bounds and not covered by reader chrome.
+// Edge also hit-tests the spoken word and scrolls a covered one back into view.
+export function firstVisibleWord(roots, bounds) {
+    const document = roots.find(Boolean)?.ownerDocument;
+    if (!document) return null;
+    const range = document.createRange();
+    const touches = rect => rect.right > bounds.left && rect.left < bounds.right && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    const within = (rect, box) => rect.width > 0 && rect.height > 0 && rect.left >= box.left - 1 &&
+        rect.right <= box.right + 1 && rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1;
+    for (const root of roots) {
+        if (!root || !touches(root.getBoundingClientRect())) continue;
+        for (const node of textNodes(root)) {
+            range.selectNodeContents(node);
+            if (!Array.from(range.getClientRects()).some(touches)) continue;
+            const objectBounds = node.parentElement.closest('.reader-object-viewport')?.getBoundingClientRect();
+            for (const match of node.textContent.matchAll(/\S+/g)) {
+                range.setStart(node, match.index);
+                range.setEnd(node, match.index + match[0].length);
+                const rect = range.getBoundingClientRect();
+                if (!within(rect, bounds) || (objectBounds && !within(rect, objectBounds))) continue;
+                const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+                if (hit && (node.parentElement.contains(hit) || hit.contains(node))) return range.cloneRange();
+            }
+        }
+    }
+    return null;
+}
+
+// Edge Read Aloud moves to text selected while it plays and then clears the
+// selection itself; never leave a stray selection when it does not take it.
+export function selectForSpeech(range) {
+    const selection = range.startContainer.ownerDocument.getSelection();
+    const text = range.toString();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    setTimeout(() => {
+        if (selection.rangeCount && !selection.isCollapsed && selection.toString() === text) selection.removeAllRanges();
+    }, 2000);
+}
+
+function anchorRange(root, anchor) {
     const node = textNodes(root)[anchor.index];
     if (!node?.length) return null;
-    revealReaderObjectTarget(node);
     const range = root.ownerDocument.createRange();
     const offset = Math.min(anchor.offset, node.length - 1);
     range.setStart(node, offset);
     range.setEnd(node, offset + 1);
+    return range;
+}
+
+function anchorPoint(viewport, paged, anchor) {
+    return readingBounds(viewport, paged).top + (anchor.paged === paged ? anchor.top : 0);
+}
+
+// How far restoreReaderTextAnchor would scroll to show the anchor again.
+export function readerTextAnchorShift(root, viewport, paged, anchor) {
+    const range = root && anchor ? anchorRange(root, anchor) : null;
+    return range ? range.getBoundingClientRect().top - anchorPoint(viewport, paged, anchor) : null;
+}
+
+export function restoreReaderTextAnchor(root, viewport, paged, columned, anchor) {
+    if (!root || !anchor) return null;
+    const range = anchorRange(root, anchor);
+    if (!range) return null;
+    revealReaderObjectTarget(range.startContainer);
     const rect = range.getBoundingClientRect();
-    if (columned) {
-        return Math.max(0, Math.floor((rect.left - viewport.getBoundingClientRect().left + viewport.scrollLeft) / viewport.clientWidth));
-    }
-    const bounds = readingBounds(viewport, paged);
-    const point = bounds.top + (anchor.paged === paged ? anchor.top : 0);
+    if (columned) return columnOf(rect, viewport);
     const scroller = paged ? viewport : window;
-    scroller.scrollBy({ top: rect.top - point, behavior: 'instant' });
+    scroller.scrollBy({ top: rect.top - anchorPoint(viewport, paged, anchor), behavior: 'instant' });
     return null;
 }
