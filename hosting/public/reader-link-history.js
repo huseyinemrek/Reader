@@ -1,3 +1,5 @@
+import { revealReaderObjectTarget } from './epub-object-view.js';
+
 // Link excursions belong to the open book, independently of normal page turns.
 export function createReaderLinkHistory({ toast, settingsButton, settingsGroup, capture, restore, onReturn }) {
     const entries = [];
@@ -67,7 +69,7 @@ function textNodes(root) {
     const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     for (let node; (node = walker.nextNode());) {
-        if (node.textContent.trim() && !node.parentElement.closest('style, script')) nodes.push(node);
+        if (node.textContent.trim() && !node.parentElement.closest('style, script, [data-reader-ui]')) nodes.push(node);
     }
     return nodes;
 }
@@ -89,13 +91,17 @@ export function captureReaderTextAnchor(root, viewport, paged) {
     const range = root.ownerDocument.createRange();
     for (let index = 0; index < nodes.length; index++) {
         const node = nodes[index];
+        const objectViewport = node.parentElement.closest('.reader-object-viewport');
+        const objectBounds = objectViewport?.getBoundingClientRect();
+        const visibleHere = rect => visible(rect) && (!objectBounds || rect.right > objectBounds.left &&
+            rect.left < objectBounds.right && rect.bottom > objectBounds.top && rect.top < objectBounds.bottom);
         range.selectNodeContents(node);
-        if (!Array.from(range.getClientRects()).some(visible)) continue;
+        if (!Array.from(range.getClientRects()).some(visibleHere)) continue;
         for (let offset = 0; offset < node.length; offset++) {
             range.setStart(node, offset);
             range.setEnd(node, offset + 1);
             const rect = range.getBoundingClientRect();
-            if (visible(rect)) return { index, offset, top: rect.top - bounds.top, paged };
+            if (visibleHere(rect)) return { index, offset, top: rect.top - bounds.top, paged };
         }
     }
     return null;
@@ -105,6 +111,7 @@ export function restoreReaderTextAnchor(root, viewport, paged, columned, anchor)
     if (!root || !anchor) return null;
     const node = textNodes(root)[anchor.index];
     if (!node?.length) return null;
+    revealReaderObjectTarget(node);
     const range = root.ownerDocument.createRange();
     const offset = Math.min(anchor.offset, node.length - 1);
     range.setStart(node, offset);

@@ -294,7 +294,7 @@ body:has(#reader-view.paged-mode)::-webkit-scrollbar,
 }
 
 #reader-view.paged-mode #book-content p {
-    break-inside: avoid-page;
+    break-inside: auto;
 }
 
 .pdf-page-tools {

@@ -174,4 +174,18 @@ async function makeHtmlz(directory) {
     return { title, file, bytes };
 }
 
-module.exports = { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub, makeImageGapEpub };
+async function makeSemanticEpub(directory) {
+    const fixture = await makeEpub(directory, 'Generated semantic pagination');
+    const zip = await JSZip.loadAsync(fixture.bytes);
+    const styles = `<style>table {border-collapse:collapse;width:100%;margin:1em 0} th,td {border:1px solid;padding:.35em;vertical-align:top} caption {font-weight:bold;margin:.4em 0} .intro {height:calc(100vh - 360px);margin:0} .forced {page-break-before:always}</style>`;
+    const rows = Array.from({ length: 7 }, (_, i) => `<tr><td>Biology ${i + 1}</td><td>Biology ${i + 1}</td><td>Culture ${i + 1}</td><td>Changes ${i + 1}</td></tr>`).join('');
+    const table = `<table id="whole-table"><caption>Comparison kept together</caption><thead><tr><th colspan="2">Biological category</th><th colspan="2">Cultural category</th></tr><tr><th>Ancient</th><th>Modern</th><th>Ancient</th><th>Modern</th></tr></thead><tbody>${rows}</tbody></table>`;
+    zip.file('OEBPS/first.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml"><head>${styles}</head><body><p class="intro" id="table-intro">Introductory discussion occupies the earlier part of this page.</p>${table}<p id="before-forced">A short closing thought before the deliberate source break.</p><p id="forced-before" class="forced">The publisher requires this passage to begin a new page.</p><h2 id="kept-heading">A heading with its opening passage</h2><p id="heading-prose">These opening lines belong with their heading. ${'Readable words preserve the chosen font and all source content. '.repeat(8)}</p></body></html>`);
+    const longRows = Array.from({ length: 55 }, (_, i) => `<tr id="table-row-${i}">${i === 0 ? '<th rowspan="2">Shared row group</th>' : i === 1 ? '' : `<th>Group ${i}</th>`}<td>Entry ${i + 1}</td><td>Complete comparison value ${i + 1}</td></tr>`).join('');
+    zip.file('OEBPS/later.xhtml', `<html xmlns="http://www.w3.org/1999/xhtml"><head>${styles}</head><body><table id="large-table"><caption>Large comparison, never cut apart</caption><thead><tr><th>Group</th><th>Entry</th><th>Value</th></tr></thead><tbody>${longRows}</tbody></table><p id="after-large-table">Reading continues after the entire large table.</p></body></html>`);
+    fixture.bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    await fs.writeFile(fixture.file, fixture.bytes);
+    return fixture;
+}
+
+module.exports = { makeEpub, makePdfGraphics, makeHtmlz, makeIllustratedEpub, makeImageGapEpub, makeSemanticEpub };

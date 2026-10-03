@@ -1,9 +1,11 @@
+import { installObjectView, revealReaderObjectTarget } from './epub-object-view.js';
+import { createEpubPagination } from './epub-pagination.js';
 import { auth, db, storage } from './firebase-config.js';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
 import { doc, setDoc, getDoc, collection, getDocs, deleteDoc, updateDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-storage.js";
 import { buildLayoutBundle } from './layout-bundle.js';
-import { createBookResources, openRangePdf, RESOURCE_BASE, storageErrorMessage, hydrateVisibleAssets, createImageGapLayout } from './cloud-reader.js';
+import { createBookResources, openRangePdf, RESOURCE_BASE, storageErrorMessage, hydrateVisibleAssets } from './cloud-reader.js';
 import { createUploadQueue } from './upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from './pdf-outline.js';
 import { getNativePdfBlocks, renderNativePdfBlocks } from './pdf-reader.js';
@@ -41,7 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let paginationFailed = false;
     const paginationFailureMessage = 'Sayfa sayısı hesaplanamadı. Bağlantıyı kontrol edip kitabı yeniden açın.';
     let layoutKey = '';
-    let imageGapLayout = createImageGapLayout();
+    let epubPagination = createEpubPagination();
     let layoutTimer = null;
     let layoutPosition = null;
     let resourceBase = 'https://epub.local/';
@@ -91,6 +93,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Reader UI Elements
     const bookContent = document.getElementById('book-content');
+    let disposeObjectView = null;
     const currentBookTitle = document.getElementById('current-book-title');
     const backToLibraryBtn = document.getElementById('back-to-library');
     document.getElementById('reader-upload-btn').addEventListener('click', () => fileInput.click());
@@ -199,8 +202,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function saveSettings() {
+        const textPosition = currentBookType !== 'pdf' ? captureLinkPosition() : null;
         localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
         applySettings();
+        if (textPosition && getLayoutKey() !== layoutKey) layoutPosition ||= textPosition;
         scheduleRepagination();
     }
 
@@ -302,7 +307,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function setReadingMode(mode) {
-        const position = captureProgress()?.data.readerPosition;
+        const position = currentBookType === 'pdf' ? null : captureLinkPosition();
         const anchor = capturePdfReadingAnchor();
         currentSettings.readingMode = mode;
         localStorage.setItem('edgeReaderSettings', JSON.stringify(currentSettings));
@@ -320,7 +325,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (mode === 'scroll') void updateScrollWindow();
             return;
         }
-        await navigate(() => showLocation(currentChapterIndex, localPagedIndex, position?.scrollRatio ?? null));
+        if (position) await restoreLinkPosition(position);
+        else await navigate(() => showLocation(currentChapterIndex, localPagedIndex));
         if (mode === 'scroll') updateScrollWindow();
     }
 
@@ -564,6 +570,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Reader Core ---
 
     function releaseBook() {
+        disposeObjectView?.();
+        disposeObjectView = null;
         linkHistory.clear();
         flushProgress();
         clearTimeout(scrollSaveTimeout);
@@ -595,7 +603,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pagedIndicator.style.display = '';
         isNavigatingPage = scrollWindowBusy = false;
         layoutKey = '';
-        imageGapLayout = createImageGapLayout();
+        epubPagination = createEpubPagination();
         layoutPosition = null;
 
         bookResources?.dispose();
@@ -619,10 +627,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     backToLibraryBtn.addEventListener('click', closeReader);
 
+    const fontMetricCache = new Map();
+    const fontMetricContext = document.createElement('canvas').getContext('2d');
+    function fontMetricIdentity() {
+        const style = getComputedStyle(bookContent);
+        const font = [style.fontFamily, style.fontSize, style.fontWeight, style.fontStyle,
+            style.fontStretch, style.fontVariationSettings, style.fontFeatureSettings, style.letterSpacing].join('|');
+        if (!fontMetricCache.has(font)) {
+            const widths = ['normal 400', 'normal 700', 'italic 400'].map(face => {
+                fontMetricContext.font = face + ' ' + style.fontSize + ' ' + style.fontFamily;
+                return Math.round(fontMetricContext.measureText('MmWwiIlıİşğ Çöü 0123456789').width * 1000) / 1000;
+            });
+            fontMetricCache.set(font, [font, ...widths]);
+        }
+        return fontMetricCache.get(font);
+    }
+
     function getLayoutKey() {
         const s = currentSettings;
-        return JSON.stringify([7, innerWidth, innerHeight, devicePixelRatio,
-            s.fontSize, s.fontFamily, s.lineHeight, s.maxWidth, s.sidePadding, s.paragraphSpacing]);
+        return JSON.stringify([8, innerWidth, innerHeight, devicePixelRatio,
+            s.fontSize, s.fontFamily, s.lineHeight, s.maxWidth, s.sidePadding, s.paragraphSpacing,
+            fontMetricIdentity(), navigator.userAgent]);
     }
 
     function commitPageMap(counts) {
@@ -708,7 +733,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     globalPage: currentGlobalPage,
                     scrollRatio,
                     layoutKey,
-                    readingMode: currentSettings.readingMode
+                    readingMode: currentSettings.readingMode,
+                    ...(currentBookType !== 'pdf' ? {anchor: null} : {})
                 }
             }
         };
@@ -765,7 +791,17 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function capturePendingTextAnchor() {
+        if (pendingProgress?.id !== currentBookId || currentBookType === 'pdf') return;
+        const position = captureLinkPosition();
+        const pending = pendingProgress.data.readerPosition;
+        if (position && pending.chapterIndex === position.chapterIndex && pending.localPage === position.localPage) {
+            pending.anchor = position.anchor;
+        }
+    }
+
     function flushProgress() {
+        capturePendingTextAnchor();
         if (!pendingProgress || !currentUser) return;
         const { id, data } = pendingProgress;
         const uid = currentUser.uid;
@@ -786,9 +822,12 @@ document.addEventListener('DOMContentLoaded', () => {
         scrollSaveTimeout = setTimeout(flushProgress, 1500);
     }
     window.addEventListener('pagehide', flushProgress);
+    bookContent.addEventListener('scroll', event => {
+        if (event.target.closest?.('.reader-object-shell') && !isNavigatingPage) saveCurrentProgress();
+    }, true);
 
     async function settleContent(article, key = null) {
-        const gapLayout = imageGapLayout;
+        const pagination = epubPagination;
         const loaded = image => image.complete ? Promise.resolve() : new Promise(resolve => {
             image.addEventListener('load', resolve, {once: true});
             image.addEventListener('error', resolve, {once: true});
@@ -805,7 +844,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await Promise.all(images);
         article.getBoundingClientRect();
         await article.ownerDocument.fonts.ready;
-        gapLayout.fit(article, key || getLayoutKey());
+        pagination.fit(article, key || getLayoutKey());
         return article.scrollWidth;
     }
 
@@ -827,8 +866,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 const cache = JSON.parse(localStorage.getItem(cacheKey));
                 if (cache && cache.key === key && cache.file === book.fileName && cache.counts.length === epubSpine.length &&
                     cache.counts.every(n => Number.isSafeInteger(n) && n >= 0) &&
-                    cache.imagePlans?.length === epubSpine.length &&
-                    imageGapLayout.restore(key, cache.imagePlans)) {
+                    cache.layoutPlans?.length === epubSpine.length &&
+                    epubPagination.restore(key, cache.layoutPlans)) {
                     commitPageMap(cache.counts);
                     updatePagedIndicator();
                     return;
@@ -865,6 +904,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 article.setAttribute(name, bookContent.getAttribute(name));
             }
             const counts = [];
+            let nextStartPage = 1;
             const length = currentBookType === 'epub' ? epubSpine.length : 1;
             for (let index = 0; index < length; index++) {
                 signal.throwIfAborted();
@@ -878,11 +918,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     continue;
                 }
                 signal.throwIfAborted();
+                section.dataset.readerStartPage = String(nextStartPage);
                 article.replaceChildren(section);
                 viewport.scrollLeft = 0;
                 await settleContent(article, key);
                 signal.throwIfAborted();
-                counts.push(Math.max(1, Math.round(viewport.scrollWidth / viewport.clientWidth)));
+                const pageCount = Math.max(1, Math.round(viewport.scrollWidth / viewport.clientWidth));
+                counts.push(pageCount);
+                nextStartPage += pageCount;
                 article.replaceChildren();
                 pagedPageText.textContent = 'Sayfalar hesaplanıyor (' + (index + 1) + '/' + length + ')…';
                 await new Promise(resolve => setTimeout(resolve, 0));
@@ -891,7 +934,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (currentBookType === 'epub') {
                 commitPageMap(counts);
                 try {localStorage.setItem(cacheKey, JSON.stringify({key, file: book.fileName, counts,
-                    imagePlans: imageGapLayout.serialize(key, length)}));} catch (_) {}
+                    layoutPlans: epubPagination.serialize(key, length)}));} catch (_) {}
             } else totalBookPages = counts[0];
             updatePagedIndicator();
         } finally {
@@ -1111,7 +1154,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Viewport tap / click navigation in Paged mode
     bookViewport.addEventListener('click', event => {
-        if (pdfLayoutView.isDragging || currentSettings.readingMode !== 'paged' || event.target.closest('a,button,input,select,[role="separator"],.pdf-page-image-column') || window.getSelection().toString()) return;
+        if (pdfLayoutView.isDragging || currentSettings.readingMode !== 'paged' || event.target.closest('a,button,input,select,[role="separator"],.pdf-page-image-column,.reader-object-shell,.reader-object-dialog') || window.getSelection().toString()) return;
         const rect = bookViewport.getBoundingClientRect();
         const x = event.clientX - rect.left;
         if (x < rect.width * 0.25) goToPrevPage();
@@ -1126,7 +1169,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     window.addEventListener('keydown', event => {
-        if (!currentBookId || pdfLayoutView.isDragging || pageJumpModal.open || event.target.closest('input,textarea,select,[contenteditable="true"],[role="separator"]')) return;
+        if (!currentBookId || pdfLayoutView.isDragging || pageJumpModal.open || event.target.closest('input,textarea,select,[contenteditable="true"],[role="separator"],.reader-object-shell,.reader-object-dialog')) return;
         if (event.ctrlKey || event.altKey || event.metaKey) return;
         if (event.key === 'Escape') {closeSidebar(settingsSidebar); closeSidebar(tocSidebar); return;}
         if (settingsSidebar.classList.contains('open') || tocSidebar.classList.contains('open')) return;
@@ -1148,7 +1191,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         if (!currentBookId || getLayoutKey() === layoutKey) return;
-        layoutPosition = captureProgress()?.data.readerPosition || layoutPosition;
+        layoutPosition ||= captureLinkPosition();
         const token = session;
         paginationAbort.abort();
         totalBookPages = 0;
@@ -1162,16 +1205,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 const position = layoutPosition;
                 layoutPosition = null;
                 if (position && currentBookId && totalBookPages > 0) {
-                    const count = currentBookType === 'epub' ? epubSpine[currentChapterIndex].pageCount : totalBookPages;
-                    await navigate(() => showLocation(currentChapterIndex, Math.min(count - 1, Math.floor(position.scrollRatio * count)), position.scrollRatio));
+                    await restoreLinkPosition(position);
                 }
             } catch (error) {if (error.name !== 'AbortError') console.error(error);}
         }, 180);
     }
     window.addEventListener('resize', scheduleRepagination);
+    document.fonts.addEventListener('loadingdone', () => {
+        fontMetricCache.clear();
+        if (currentBookType !== 'pdf') scheduleRepagination();
+    });
 
     async function openBook(id) {
         releaseBook();
+        disposeObjectView = installObjectView(bookContent);
         const token = session;
         showLoading('Kitap hazırlanıyor…');
         try {
@@ -1230,8 +1277,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (currentBookType === 'epub') {
                 try {
                     const cache = JSON.parse(localStorage.getItem('edgeReaderPages:' + currentBookId));
-                    if (cache?.key === getLayoutKey() && cache.file === book.fileName && cache.imagePlans?.length === epubSpine.length) {
-                        imageGapLayout.restore(cache.key, cache.imagePlans);
+                    if (cache?.key === getLayoutKey() && cache.file === book.fileName && cache.layoutPlans?.length === epubSpine.length) {
+                        epubPagination.restore(cache.key, cache.layoutPlans);
                     }
                 } catch (_) {}
             }
@@ -1242,7 +1289,13 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLoading();
             await startPagination();
             if (token !== session) return;
-            if (totalBookPages > 0 && params.has('page') && !params.has('ch')) {
+            const savedTarget = saved?.anchor && currentBookType !== 'pdf' && totalBookPages > 0 &&
+                (!params.has('ch') || Number(params.get('ch')) === saved.chapterIndex) &&
+                (!params.has('local') || Number(params.get('local')) === saved.localPage) &&
+                (!params.has('page') || Number(params.get('page')) === saved.globalPage);
+            if (savedTarget) {
+                await restoreLinkPosition({...saved, bookId: id, chapterIndex: chapter});
+            } else if (totalBookPages > 0 && params.has('page') && !params.has('ch')) {
                 await goToPage(Math.max(1, Math.min(totalBookPages, Number(params.get('page')) || 1)));
             } else {
                 if (totalBookPages > 0 && saved && saved.layoutKey !== layoutKey && !params.has('local')) {
@@ -1518,12 +1571,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const opfUrl = new URL(root.split('/').map(encodeURIComponent).join('/'), resourceBase).href;
         const opf = parser.parseFromString(await fetchText(opfUrl), 'application/xml');
         const manifest = new Map(Array.from(opf.querySelectorAll('manifest > item'), item => [item.getAttribute('id'), item.getAttribute('href')]));
+        const packageLayout = opf.querySelector('metadata > meta[property="rendition:layout"]:not([refines])')?.textContent.trim() || 'reflowable';
+        const progression = opf.querySelector('spine')?.getAttribute('page-progression-direction') || 'default';
         epubSpine = Array.from(opf.querySelectorAll('spine > itemref'), item => {
             const href = manifest.get(item.getAttribute('idref'));
             if (!href) throw new Error('EPUB bölüm kaydı eksik.');
             const url = new URL(href, opfUrl).href;
             const path = url.slice(resourceBase.length).split('#')[0];
-            return {url, id: 'chapter-' + decodeURIComponent(path), pageCount: 0, startPage: 0};
+            const properties = (item.getAttribute('properties') || '').split(/\s+/);
+            const layout = properties.includes('rendition:layout-pre-paginated') ? 'pre-paginated'
+                : properties.includes('rendition:layout-reflowable') ? 'reflowable' : packageLayout;
+            return {url, id: 'chapter-' + decodeURIComponent(path), layout, progression, pageCount: 0, startPage: 0};
         });
         if (!epubSpine.length) throw new Error('EPUB bölümleri bulunamadı.');
     }
@@ -1535,6 +1593,9 @@ document.addEventListener('DOMContentLoaded', () => {
         signal.throwIfAborted();
         const section = await bookResources.section(html, chapter.url, targetDocument, index, chapter.id);
         signal.throwIfAborted();
+        section.dataset.readerStartPage = String(chapter.startPage || 1);
+        section.dataset.readerLayoutType = chapter.layout;
+        section.dataset.readerProgression = chapter.progression;
         return section;
     }
 
@@ -1574,9 +1635,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (url.hash) {
                 const target = document.getElementById(decodeURIComponent(url.hash.slice(1)));
                 if (target && currentSettings.readingMode === 'paged') {
-                    localPagedIndex = Math.max(0, Math.floor((target.getBoundingClientRect().left - bookViewport.getBoundingClientRect().left + bookViewport.scrollLeft) / bookViewport.clientWidth));
+                    const pageTarget = target.closest('.reader-object-shell') || target;
+                    localPagedIndex = Math.max(0, Math.floor((pageTarget.getBoundingClientRect().left - bookViewport.getBoundingClientRect().left + bookViewport.scrollLeft) / bookViewport.clientWidth));
                     updatePagedView();
                 } else target?.scrollIntoView();
+                if (target) revealReaderObjectTarget(target);
             }
         }));
     });

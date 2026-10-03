@@ -163,7 +163,7 @@ export { app,auth,db,storage };`;
     });
 }
 
-async function seedHosting(page, runtime, epub, pdfGraphics, html, illustratedEpub, imageGapEpub) {
+async function seedHosting(page, runtime, epub, pdfGraphics, html, illustratedEpub, imageGapEpub, semanticEpub) {
     await page.goto(runtime.base, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof JSZip === 'function');
     const fixtures = [];
@@ -178,6 +178,8 @@ async function seedHosting(page, runtime, epub, pdfGraphics, html, illustratedEp
         bytes: illustratedEpub.bytes.toString('base64') });
     fixtures.push({ id: 'book_test_image_gaps', name: path.basename(imageGapEpub.file), title: imageGapEpub.title,
         bytes: imageGapEpub.bytes.toString('base64') });
+    if (semanticEpub) fixtures.push({ id: 'book_test_semantic', name: path.basename(semanticEpub.file), title: semanticEpub.title,
+        bytes: semanticEpub.bytes.toString('base64') });
     await page.evaluate(async fixtures => {
         const { auth, db, storage } = await import('/firebase-config.js');
         const { createUserWithEmailAndPassword } = await import('https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js');
