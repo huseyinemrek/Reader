@@ -265,6 +265,19 @@ body:has(#reader-view.paged-mode)::-webkit-scrollbar,
     border-radius: 0 !important;
 }
 
+/* Edge Read Aloud never enters a block whose computed overflow is exactly "hidden"
+   while it overflows sideways, so it skipped the whole paged book. "hidden auto"
+   keeps paging programmatic, and the content clips its own vertical overflow so
+   the viewport never scrolls vertically. */
+#reader-view.paged-mode #book-viewport:not(.pdf-paged-viewport) {
+    overflow-y: auto;
+}
+
+#reader-view.paged-mode #book-viewport:not(.pdf-paged-viewport) #book-content {
+    overflow-x: visible !important;
+    overflow-y: clip !important;
+}
+
 /* CSS columns omit the last gutter from scrollWidth. Keep the last page aligned. */
 #reader-view.paged-mode #book-viewport:not(.pdf-paged-viewport)::after {
     content: "";
@@ -782,9 +795,12 @@ select option {
     color: white;
 }
 
-.library-header h1 {
+/* Not an <h1>: Edge Read Aloud's fallback start reads the page's first <h1>,
+   which was this hidden title while a book was open. */
+.library-header .library-title {
     font-family: 'Outfit', sans-serif;
     font-size: 2rem;
+    font-weight: 700;
     margin: 0;
 }
 

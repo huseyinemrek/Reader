@@ -122,16 +122,15 @@ export function speechHighlightColumn(root, viewport) {
     return spoken ? columnOf(spoken.getBoundingClientRect(), viewport) : null;
 }
 
-// Edge exposes no events, so its highlight spans are the only signal. `started`
-// marks the first highlight after none was shown: a new Read Aloud start rather
-// than the next word, a pause or Edge's previous/next paragraph buttons.
+// Edge exposes no events, so its highlight spans are the only signal. Each spoken
+// word gets a new span; a pause keeps the last one in place.
 export function watchSpeechHighlight(document, onHighlight) {
-    let shown = false;
+    let last = null;
     const observer = new document.defaultView.MutationObserver(() => {
         const highlight = speechHighlight(document);
-        const started = !!highlight && !shown;
-        shown = !!highlight;
-        if (highlight) onHighlight(highlight, started);
+        if (highlight === last) return;
+        last = highlight;
+        if (highlight) onHighlight(highlight);
     });
     observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
@@ -148,28 +147,82 @@ export function speechStartsContainer(container, highlight, isBookText = () => t
     return false;
 }
 
-// The first word whose box is fully inside bounds and not covered by reader chrome.
-// Edge also hit-tests the spoken word and scrolls a covered one back into view.
+const speechBlocks = 'p, li, dd, dt, blockquote, pre, figcaption, td, th, h1, h2, h3, h4, h5, h6, div';
+
+// Where Edge reads, as a text offset in its block: Edge's spans come and go
+// around the word and are normalized away, but the block's text never changes.
+export function speechPosition(highlight) {
+    const block = highlight.closest(speechBlocks) || highlight.parentElement;
+    const range = highlight.ownerDocument.createRange();
+    range.setStart(block, 0);
+    range.setEndBefore(highlight);
+    return { block, offset: range.toString().length };
+}
+
+// The word at a speechPosition while its block is still mounted.
+export function speechPositionWord(position) {
+    if (!position?.block.isConnected) return null;
+    const walker = position.block.ownerDocument.createTreeWalker(position.block, NodeFilter.SHOW_TEXT);
+    let remaining = position.offset;
+    for (let node; (node = walker.nextNode());) {
+        if (remaining < node.length) {
+            const match = Array.from(node.textContent.matchAll(/\S+/g)).find(word => word.index + word[0].length > remaining);
+            if (!match) return null;
+            const range = node.ownerDocument.createRange();
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            return range;
+        }
+        remaining -= node.length;
+    }
+    return null;
+}
+
+// Edge reads forward and its paragraph buttons step to a neighbouring block; a move
+// backwards over book text means Edge started over from its default point.
+export function speechRestarted(previous, highlight) {
+    if (!previous?.block.isConnected) return true;
+    const block = highlight.closest(speechBlocks) || highlight.parentElement;
+    if (block === previous.block || block.contains(previous.block) || previous.block.contains(block)) return false;
+    if (previous.block.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) return false;
+    const range = block.ownerDocument.createRange();
+    range.setStartAfter(block);
+    range.setEndBefore(previous.block);
+    return !!range.toString().trim();
+}
+
+function within(rect, box) {
+    return rect.width > 0 && rect.height > 0 && rect.left >= box.left - 1 &&
+        rect.right <= box.right + 1 && rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1;
+}
+
+// A word fully inside bounds and not covered by reader chrome: Edge hit-tests
+// the spoken word too and scrolls a covered one back into view.
+export function wordOnScreen(range, bounds) {
+    const rect = range.getBoundingClientRect();
+    if (!within(rect, bounds)) return false;
+    const parent = range.startContainer.parentElement;
+    const objectBounds = parent.closest('.reader-object-viewport')?.getBoundingClientRect();
+    if (objectBounds && !within(rect, objectBounds)) return false;
+    const hit = parent.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return !!hit && (parent.contains(hit) || hit.contains(range.startContainer));
+}
+
+// The first word on screen, i.e. the first word of the first fully visible line.
 export function firstVisibleWord(roots, bounds) {
     const document = roots.find(Boolean)?.ownerDocument;
     if (!document) return null;
     const range = document.createRange();
     const touches = rect => rect.right > bounds.left && rect.left < bounds.right && rect.bottom > bounds.top && rect.top < bounds.bottom;
-    const within = (rect, box) => rect.width > 0 && rect.height > 0 && rect.left >= box.left - 1 &&
-        rect.right <= box.right + 1 && rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1;
     for (const root of roots) {
         if (!root || !touches(root.getBoundingClientRect())) continue;
         for (const node of textNodes(root)) {
             range.selectNodeContents(node);
             if (!Array.from(range.getClientRects()).some(touches)) continue;
-            const objectBounds = node.parentElement.closest('.reader-object-viewport')?.getBoundingClientRect();
             for (const match of node.textContent.matchAll(/\S+/g)) {
                 range.setStart(node, match.index);
                 range.setEnd(node, match.index + match[0].length);
-                const rect = range.getBoundingClientRect();
-                if (!within(rect, bounds) || (objectBounds && !within(rect, objectBounds))) continue;
-                const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-                if (hit && (node.parentElement.contains(hit) || hit.contains(node))) return range.cloneRange();
+                if (wordOnScreen(range, bounds)) return range.cloneRange();
             }
         }
     }

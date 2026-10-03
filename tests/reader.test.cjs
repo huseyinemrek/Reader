@@ -246,13 +246,14 @@ function speakWord({ selector, word = 0, scroll = false } = {}) {
     throw new Error('No word to mark in ' + selector);
 }
 
-// Whether the selection is the first word of the first fully visible book line.
+// Whether the selection is the first word of the first fully visible book line
+// (from the reading line in scroll mode, where the reader places jump targets).
 function selectionStartsView() {
     const selection = getSelection();
     if (!selection.rangeCount || selection.isCollapsed) return { selected: '' };
     const viewport = document.getElementById('book-viewport').getBoundingClientRect();
     const paged = document.getElementById('reader-view').classList.contains('paged-mode');
-    const top = paged ? viewport.top : 0;
+    const top = paged ? viewport.top : 80;
     const bottom = paged ? viewport.bottom : innerHeight;
     const shown = rect => rect.width > 0 && rect.left >= viewport.left - 1 && rect.right <= viewport.right + 1 &&
         rect.top >= top - 1 && rect.bottom <= bottom + 1;
@@ -1331,10 +1332,37 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 // A right-click start on the visible passage is a new start but not Edge's default point.
                 await page.evaluate(speakWord, { selector: '#Later-32', word: 2 });
                 assert.equal(await noSelection(), '');
-                // Edge's own paragraph buttons move an existing highlight; they never restart it.
+                // Edge's previous-paragraph button steps from the second block onto the first one.
+                await page.evaluate(speakWord, { selector: '#book-content > section[data-index="0"] .source-runs', word: 1 });
                 await page.evaluate(speakWord, { selector: '#book-content > section[data-index="0"]' });
                 assert.equal(await noSelection(), '');
                 assert.ok(Math.abs(await page.evaluate(() => window.scrollY) - userY) <= 3);
+
+                // Play after Edge paused itself restarts at its default point without clearing the
+                // paused word first; reading resumes at that paused word when it is on screen.
+                await page.evaluate(speakWord, { selector: '#Later-31', word: 3 });
+                const paused = await page.$eval('.msreadout-word-highlight', word => word.textContent);
+                await page.evaluate(speakWord, { selector: '#book-content > section[data-index="0"]', scroll: true });
+                await page.waitForFunction(() => getSelection().toString().trim().length > 0, { timeout: 5000 });
+                assert.equal(await page.evaluate(() => getSelection().toString()), paused, 'Reading resumes at the paused word');
+                assert.ok(Math.abs(await page.evaluate(() => window.scrollY) - userY) <= 3, 'The reader returns to the paused passage');
+                await page.evaluate(() => getSelection().removeAllRanges());
+
+                // Switching to paged mode keeps the chapter Edge reads mounted, so reading goes on.
+                await page.evaluate(speakWord, { selector: '#Later-31', word: 3 });
+                await page.evaluate(() => { window.readerTestSection = document.querySelector('#book-content > section[data-index="1"]'); });
+                await openSidebar(page, 'settings');
+                await page.click('#mode-paged-btn');
+                await page.click('#settings-close');
+                await page.waitForFunction(() => document.getElementById('reader-view').classList.contains('paged-mode') &&
+                    !document.getElementById('page-jump-input').disabled, { timeout: 30000 });
+                assert.equal(await page.evaluate(() => {
+                    const viewport = document.getElementById('book-viewport').getBoundingClientRect();
+                    const word = document.querySelector('.msreadout-word-highlight')?.getBoundingClientRect();
+                    return document.querySelectorAll('#book-content > section').length === 1 &&
+                        document.querySelector('#book-content > section') === window.readerTestSection &&
+                        word?.left >= viewport.left && word.right <= viewport.right;
+                }), true, 'The spoken chapter stays mounted and its page shows the spoken word');
             } finally {
                 await page.evaluate(() => getSelection().removeAllRanges());
                 await page.evaluate(speakWord, {});
@@ -1351,6 +1379,15 @@ for (const mode of ['local', 'vps', 'hosting']) {
                     ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode: 'paged' })));
                 await page.goto(`${base}/book/book_test_epub?ch=0&local=2`, { waitUntil: 'domcontentloaded' });
                 await waitForPages(page);
+                // Edge skips a block whose computed overflow is exactly "hidden" while it overflows
+                // sideways; the paged book must not match that, nor scroll vertically.
+                assert.notEqual(await page.$eval('#book-viewport', viewport => getComputedStyle(viewport).overflow), 'hidden');
+                await page.mouse.move(700, 400);
+                await page.mouse.wheel({ deltaY: 400 });
+                await delay(200);
+                assert.equal(await page.$eval('#book-viewport', viewport => viewport.scrollTop), 0);
+                // Edge's fallback start reads the page's first <h1>: never the hidden library title.
+                assert.equal(await page.evaluate(() => !!document.querySelector('h1')?.closest('#library-view')), false);
                 const left = await page.$eval('#book-viewport', viewport => viewport.scrollLeft);
                 // Edge skips the paged viewport and starts with the page indicator before the book.
                 await page.evaluate(speakWord, { selector: '#paged-page-text' });

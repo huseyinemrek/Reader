@@ -10,7 +10,8 @@ import { createUploadQueue } from './upload-queue.js';
 import { loadPdfOutline, renderPdfToc } from './pdf-outline.js';
 import { getNativePdfBlocks, renderNativePdfBlocks } from './pdf-reader.js';
 import { createReaderLinkHistory, captureReaderTextAnchor, restoreReaderTextAnchor, readerTextAnchorShift, speechHighlight,
-    speechHighlightColumn, watchSpeechHighlight, speechStartsContainer, firstVisibleWord, selectForSpeech } from './reader-link-history.js';
+    speechHighlightColumn, watchSpeechHighlight, speechStartsContainer, speechPosition, speechPositionWord, speechRestarted,
+    wordOnScreen, firstVisibleWord, selectForSpeech } from './reader-link-history.js';
 import { createPdfLayoutView, createPdfPage } from './pdf-layout-view.js';
 
 let currentUser = null;
@@ -51,6 +52,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let settledPosition = null;
     let settleTimer = null;
     let speechSection = null;
+    // The last word Edge read outside a default start: where Play should resume.
+    let speechResume = null;
+    let speechRedirected = false;
+    // window.scrollY as of the last scroll event: Edge's own jump has not reached it yet.
+    let lastScrollY = 0;
     let scrollWindowAgain = false;
     let pagedAlignTimer = null;
     let resourceBase = 'https://epub.local/';
@@ -332,7 +338,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (mode === 'scroll') void updateScrollWindow();
             return;
         }
-        if (position) await restoreLinkPosition(position);
+        if (position) await restoreLinkPosition(position, {followSpeech: true});
         else await navigate(() => showLocation(currentChapterIndex, localPagedIndex));
         if (mode === 'scroll') updateScrollWindow();
     }
@@ -613,8 +619,8 @@ document.addEventListener('DOMContentLoaded', () => {
         isNavigatingPage = scrollWindowBusy = false;
         layoutKey = '';
         epubPagination = createEpubPagination();
-        layoutPosition = settledPosition = speechSection = null;
-        scrollWindowAgain = false;
+        layoutPosition = settledPosition = speechSection = speechResume = null;
+        scrollWindowAgain = speechRedirected = false;
 
         bookResources?.dispose();
         bookResources = null;
@@ -779,16 +785,26 @@ document.addEventListener('DOMContentLoaded', () => {
     async function restoreLinkPosition(position, {followSpeech = false} = {}) {
         if (position.bookId !== currentBookId) return false;
         return navigate(async () => {
-            const count = currentBookType === 'epub' ? epubSpine[position.chapterIndex].pageCount : totalBookPages;
-            const index = currentBookType === 'pdf' ? position.localPage : position.chapterIndex;
             const paged = currentSettings.readingMode === 'paged';
+            // A paged view keeps the section Edge Read Aloud reads when it is mounted.
+            const spokenSection = followSpeech && paged && currentBookType !== 'pdf'
+                ? speechHighlight(bookContent)?.closest('#book-content > section') : null;
+            const chapterIndex = spokenSection ? Number(spokenSection.dataset.index) : position.chapterIndex;
+            const count = currentBookType === 'epub' ? epubSpine[chapterIndex].pageCount : totalBookPages;
+            const index = currentBookType === 'pdf' ? position.localPage : chapterIndex;
             let section = bookContent.querySelector(':scope > section[data-index="' + index + '"]');
             // Reflow mounted text in place: speech tools such as Edge Read Aloud hold
             // its nodes and stop, losing their place, when it is rendered again.
-            const mounted = currentBookType !== 'pdf' && section && section.dataset.loaded !== 'false' &&
-                (!paged || bookContent.children.length === 1);
+            const mounted = currentBookType !== 'pdf' && section && section.dataset.loaded !== 'false';
             if (mounted) {
-                if (paged) window.scrollTo({top: 0, behavior: 'instant'});
+                if (paged) {
+                    // Paged mode shows one chapter: drop the scroll window's other sections.
+                    const others = Array.from(bookContent.children).filter(element => element !== section);
+                    if (others.length && ttsActive) stopTTS();
+                    others.forEach(element => element.remove());
+                    currentChapterIndex = chapterIndex;
+                    window.scrollTo({top: 0, behavior: 'instant'});
+                }
             } else {
                 const local = currentBookType === 'pdf' || (position.layoutKey === layoutKey && position.readingMode === currentSettings.readingMode)
                     ? position.localPage : Math.min(count - 1, Math.floor(position.scrollRatio * count));
@@ -1172,6 +1188,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window.addEventListener('scroll', () => {
+        lastScrollY = window.scrollY;
         loadVisibleAssets();
         if (!currentBookId || currentSettings.readingMode !== 'scroll' || isNavigatingPage) return;
         syncScrollPage();
@@ -1812,13 +1829,15 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.target === bookViewport) alignPagedScroll();
     });
 
-    // Ctrl+Shift+U starts Edge Read Aloud at its default point: the first loaded
-    // text, or reader chrome before the book when Edge skips the paged viewport.
-    // Reading begun anywhere else (right click, Edge's own buttons) is left alone.
+    // Ctrl+Shift+U, or Play after Edge paused itself (another tab became active),
+    // starts Edge Read Aloud at its default point: the first loaded text, the page's
+    // first <h1>, or reader chrome before the book.
     function isDefaultSpeechStart(highlight) {
         if (!bookContent.contains(highlight)) {
             return !!(highlight.compareDocumentPosition(bookContent) & Node.DOCUMENT_POSITION_FOLLOWING);
         }
+        const heading = highlight.closest('h1');
+        if (heading && heading === document.querySelector('h1')) return true;
         const first = Array.from(bookContent.children).find(section => section.dataset.loaded !== 'false');
         return !!first?.contains(highlight) && speechStartsContainer(first, highlight,
             node => currentBookType !== 'pdf' || !!node.parentElement.closest('.pdf-page-text'));
@@ -1826,58 +1845,72 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function readerViewBounds(paged) {
         const rect = bookViewport.getBoundingClientRect();
-        return paged ? { left: rect.left, right: rect.right, top: Math.max(0, rect.top), bottom: Math.min(innerHeight, rect.bottom) }
-            : { left: Math.max(0, rect.left), right: Math.min(innerWidth, rect.right), top: 0, bottom: innerHeight };
+        return paged ? {left: rect.left, right: rect.right, top: Math.max(0, rect.top), bottom: Math.min(innerHeight, rect.bottom)}
+            : {left: Math.max(0, rect.left), right: Math.min(innerWidth, rect.right), top: 0, bottom: innerHeight};
     }
 
-    // Move a default start to the first fully visible word of the reader's own view.
-    // Edge has already scrolled to its start, so that view is restored first; Edge
-    // then moves to a selection made while it plays and clears the selection.
-    function redirectSpeechStart(attempt = 0) {
+    // Bring a default start back to the reader: restore the reader's own view (Edge
+    // has already scrolled to its start), then select the word Edge read last when it
+    // is on screen, else the first fully visible word, unless Edge's start is itself
+    // on screen. Edge moves to a selection made while it plays and clears it.
+    // `view` is the reader's view just before Edge's scroll; during a navigation the
+    // settled navigation decides it instead.
+    function redirectSpeechStart(resume, view = null, attempt = 0) {
         const highlight = speechHighlight(document);
         if (!currentBookId || !highlight) return;
         if (isNavigatingPage) {
-            if (attempt < 15) setTimeout(redirectSpeechStart, 200, attempt + 1);
+            if (attempt < 15) setTimeout(redirectSpeechStart, 200, resume, null, attempt + 1);
             return;
         }
+        view ||= {scrollY: window.scrollY, page: localPagedIndex, anchor: pdfReadingAnchor};
         const paged = currentSettings.readingMode === 'paged';
-        const bounds = readerViewBounds(paged);
-        const shownAfter = shift => {
-            const rect = highlight.getBoundingClientRect();
-            return bookContent.contains(highlight) && rect.bottom - shift > bounds.top && rect.top - shift < bounds.bottom;
-        };
         let roots;
         if (currentBookType === 'pdf') {
-            const anchor = pdfReadingAnchor;
-            const shift = pdfAnchorShift(anchor);
-            if (shift === null || shownAfter(shift)) return;
-            restorePdfReadingAnchor(anchor);
+            if (pdfAnchorShift(view.anchor) === null) return;
+            restorePdfReadingAnchor(view.anchor);
             roots = Array.from(bookContent.querySelectorAll(paged
                 ? '.pdf-page[data-page-index="' + currentPdfPage + '"] .pdf-page-text' : ':scope > section .pdf-page-text'));
         } else if (paged) {
             const section = bookContent.querySelector(':scope > section[data-index="' + currentChapterIndex + '"]');
-            if (!section || (bookContent.contains(highlight) && speechHighlightColumn(section, bookViewport) === localPagedIndex)) return;
+            if (!section) return;
             // Leave the page indicator text alone: Edge may be reading it right now.
-            const left = localPagedIndex * bookViewport.clientWidth;
-            if (Math.abs(bookViewport.scrollLeft - left) > 1) bookViewport.scrollTo({ left, behavior: 'instant' });
+            const left = view.page * bookViewport.clientWidth;
+            if (Math.abs(bookViewport.scrollLeft - left) > 1) bookViewport.scrollTo({left, behavior: 'instant'});
             roots = [section];
         } else {
-            const user = [layoutPosition, settledPosition].find(position =>
-                position?.bookId === currentBookId && position.readingMode === 'scroll');
-            const section = user && bookContent.querySelector(':scope > section[data-index="' + user.chapterIndex + '"]');
-            if (!section || section.dataset.loaded === 'false') return;
-            const shift = readerTextAnchorShift(section, bookViewport, false, user.anchor);
-            if (shift === null || shownAfter(shift)) return;
-            restoreReaderTextAnchor(section, bookViewport, false, false, user.anchor);
+            // A pending reflow remembers the reader's text; otherwise the scroll offset does.
+            const pending = layoutPosition?.bookId === currentBookId && layoutPosition.readingMode === 'scroll' ? layoutPosition : null;
+            const section = pending && bookContent.querySelector(':scope > section[data-index="' + pending.chapterIndex + '"]');
+            if (section && section.dataset.loaded !== 'false' && readerTextAnchorShift(section, bookViewport, false, pending.anchor) !== null) {
+                restoreReaderTextAnchor(section, bookViewport, false, false, pending.anchor);
+            } else window.scrollTo({top: view.scrollY, behavior: 'instant'});
             roots = Array.from(bookContent.children).filter(element => element.dataset.loaded !== 'false');
         }
-        const word = firstVisibleWord(roots, readerViewBounds(paged));
+        const screen = readerViewBounds(paged);
+        // Scroll mode reads from the reader's reading line, as its saved positions do; a
+        // jump places its target there, so reading starts at the target, not above it.
+        const reading = paged ? screen : {...screen, top: Math.min(80, screen.bottom)};
+        const last = speechPositionWord(resume);
+        let word = last && wordOnScreen(last, screen) ? last : null;
+        if (!word) {
+            const spoken = document.createRange();
+            spoken.selectNodeContents(highlight);
+            if (bookContent.contains(highlight) && wordOnScreen(spoken, reading)) return;
+            word = firstVisibleWord(roots, reading);
+        }
         if (word) selectForSpeech(word);
     }
 
-    watchSpeechHighlight(document, (highlight, started) => {
+    watchSpeechHighlight(document, highlight => {
         if (!currentBookId) return;
-        if (started && isDefaultSpeechStart(highlight)) redirectSpeechStart();
+        if (isDefaultSpeechStart(highlight) && (!bookContent.contains(highlight) || speechRestarted(speechResume, highlight))) {
+            // Runs before the scroll event of Edge's own jump: the reader's view is still known.
+            if (!speechRedirected) redirectSpeechStart(speechResume, {scrollY: lastScrollY, page: localPagedIndex, anchor: pdfReadingAnchor});
+            speechRedirected = true;
+        } else {
+            speechRedirected = false;
+            speechResume = speechPosition(highlight);
+        }
         const section = highlight.closest('#book-content > section');
         if (section === speechSection) return;
         speechSection = section;
