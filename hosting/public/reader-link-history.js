@@ -66,10 +66,16 @@ export function createReaderLinkHistory({ toast, settingsButton, settingsGroup, 
 }
 
 function textNodes(root) {
+    return bookTextNodes(root).filter(node => node.textContent.trim());
+}
+
+// Character offsets over every text node stay put when Edge Read Aloud splits
+// nodes around its spans and normalizes them again.
+function bookTextNodes(root) {
     const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
     for (let node; (node = walker.nextNode());) {
-        if (node.textContent.trim() && !node.parentElement.closest('style, script, [data-reader-ui]')) nodes.push(node);
+        if (!node.parentElement.closest('style, script, [data-reader-ui]')) nodes.push(node);
     }
     return nodes;
 }
@@ -87,10 +93,12 @@ export function captureReaderTextAnchor(root, viewport, paged) {
     const bounds = readingBounds(viewport, paged);
     const visible = rect => rect.right > bounds.left + 1 && rect.left < bounds.right - 1 &&
         rect.bottom > bounds.top && rect.top < bounds.bottom;
-    const nodes = textNodes(root);
     const range = root.ownerDocument.createRange();
-    for (let index = 0; index < nodes.length; index++) {
-        const node = nodes[index];
+    let char = 0;
+    for (const node of bookTextNodes(root)) {
+        const start = char;
+        char += node.length;
+        if (!node.textContent.trim()) continue;
         const objectViewport = node.parentElement.closest('.reader-object-viewport');
         const objectBounds = objectViewport?.getBoundingClientRect();
         const visibleHere = rect => visible(rect) && (!objectBounds || rect.right > objectBounds.left &&
@@ -101,10 +109,26 @@ export function captureReaderTextAnchor(root, viewport, paged) {
             range.setStart(node, offset);
             range.setEnd(node, offset + 1);
             const rect = range.getBoundingClientRect();
-            if (visibleHere(rect)) return { index, offset, top: rect.top - bounds.top, paged };
+            if (visibleHere(rect)) return { char: start + offset, top: rect.top - bounds.top, paged };
         }
     }
     return null;
+}
+
+// The anchor of a point in root's text, e.g. the word Edge Read Aloud speaks.
+export function readerTextAnchorAt(root, node, offset, paged) {
+    let char = 0;
+    for (const text of bookTextNodes(root)) {
+        if (text === node) return { char: char + offset, top: 0, paged };
+        char += text.length;
+    }
+    return null;
+}
+
+// The word at or after an anchor, while its text is mounted.
+export function readerTextAnchorWord(root, anchor) {
+    const range = root && anchor ? anchorRange(root, anchor) : null;
+    return range && wordFrom(range.startContainer, range.startOffset);
 }
 
 function columnOf(rect, viewport) {
@@ -123,14 +147,16 @@ export function speechHighlightColumn(root, viewport) {
 }
 
 // Edge exposes no events, so its highlight spans are the only signal. Each spoken
-// word gets a new span; a pause keeps the last one in place.
+// word gets a new span; a pause keeps the last one in place. The first highlight
+// after none is fresh: Edge started reading.
 export function watchSpeechHighlight(document, onHighlight) {
     let last = null;
     const observer = new document.defaultView.MutationObserver(() => {
         const highlight = speechHighlight(document);
         if (highlight === last) return;
+        const fresh = !last;
         last = highlight;
-        if (highlight) onHighlight(highlight);
+        if (highlight) onHighlight(highlight, fresh);
     });
     observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
@@ -165,17 +191,19 @@ export function speechPositionWord(position) {
     const walker = position.block.ownerDocument.createTreeWalker(position.block, NodeFilter.SHOW_TEXT);
     let remaining = position.offset;
     for (let node; (node = walker.nextNode());) {
-        if (remaining < node.length) {
-            const match = Array.from(node.textContent.matchAll(/\S+/g)).find(word => word.index + word[0].length > remaining);
-            if (!match) return null;
-            const range = node.ownerDocument.createRange();
-            range.setStart(node, match.index);
-            range.setEnd(node, match.index + match[0].length);
-            return range;
-        }
+        if (remaining < node.length) return wordFrom(node, remaining);
         remaining -= node.length;
     }
     return null;
+}
+
+function wordFrom(node, offset) {
+    const match = Array.from(node.textContent.matchAll(/\S+/g)).find(word => word.index + word[0].length > offset);
+    if (!match) return null;
+    const range = node.ownerDocument.createRange();
+    range.setStart(node, match.index);
+    range.setEnd(node, match.index + match[0].length);
+    return range;
 }
 
 // Edge reads forward and its paragraph buttons step to a neighbouring block; a move
@@ -194,6 +222,10 @@ export function speechRestarted(previous, highlight) {
 function within(rect, box) {
     return rect.width > 0 && rect.height > 0 && rect.left >= box.left - 1 &&
         rect.right <= box.right + 1 && rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1;
+}
+
+export function rangeWithin(range, bounds) {
+    return within(range.getBoundingClientRect(), bounds);
 }
 
 // A word fully inside bounds and not covered by reader chrome: Edge hit-tests
@@ -242,10 +274,20 @@ export function selectForSpeech(range) {
 }
 
 function anchorRange(root, anchor) {
-    const node = textNodes(root)[anchor.index];
+    let node = null;
+    let offset = anchor.char;
+    if (offset === undefined) {
+        // Saved before character anchors: the index of a non-blank text node.
+        node = textNodes(root)[anchor.index];
+        offset = Math.min(anchor.offset, (node?.length || 1) - 1);
+    } else {
+        for (const text of bookTextNodes(root)) {
+            if (offset < text.length) { node = text; break; }
+            offset -= text.length;
+        }
+    }
     if (!node?.length) return null;
     const range = root.ownerDocument.createRange();
-    const offset = Math.min(anchor.offset, node.length - 1);
     range.setStart(node, offset);
     range.setEnd(node, offset + 1);
     return range;

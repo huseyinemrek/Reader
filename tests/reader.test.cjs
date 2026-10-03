@@ -274,6 +274,70 @@ function selectionStartsView() {
         first: !!first && Math.abs(first.top - selected.top) <= 1 && Math.abs(first.left - selected.left) <= 1 };
 }
 
+// The first word on the current and on the next paged page, and the selected word, each
+// as its block's id and its word index there (counted as speakWord counts).
+function pagedWords() {
+    const viewport = document.getElementById('book-viewport');
+    const bounds = viewport.getBoundingClientRect();
+    const page = Math.round(viewport.scrollLeft / viewport.clientWidth);
+    const identity = (node, offset) => {
+        const block = node.parentElement.closest('[id]');
+        const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+        let count = 0;
+        for (let text; (text = walker.nextNode());) {
+            if (text.parentElement.closest('style, script, [data-reader-ui]')) continue;
+            for (const match of text.textContent.matchAll(/\S+/g)) {
+                if (text === node && match.index + match[0].length > offset) return { id: block.id, word: count, text: match[0] };
+                count++;
+            }
+        }
+        return null;
+    };
+    const range = document.createRange();
+    const walker = document.createTreeWalker(document.getElementById('book-content'), NodeFilter.SHOW_TEXT);
+    let first = null;
+    let next = null;
+    for (let node; !next && (node = walker.nextNode());) {
+        if (node.parentElement.closest('style, script, [data-reader-ui]')) continue;
+        for (const match of node.textContent.matchAll(/\S+/g)) {
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            const rect = range.getBoundingClientRect();
+            if (!rect.width) continue;
+            const column = Math.floor((rect.left - bounds.left + viewport.scrollLeft) / viewport.clientWidth);
+            if (!first && column === page && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1) first = identity(node, match.index);
+            if (column === page + 1) {
+                next = identity(node, match.index);
+                break;
+            }
+        }
+    }
+    const selection = getSelection();
+    const selected = selection.rangeCount && !selection.isCollapsed
+        ? identity(selection.getRangeAt(0).startContainer, selection.getRangeAt(0).startOffset) : null;
+    return { page, first, next, selected };
+}
+
+// Whether a pagedWords word is fully inside the paged viewport.
+function pagedWordShown({ id, word }) {
+    const bounds = document.getElementById('book-viewport').getBoundingClientRect();
+    const walker = document.createTreeWalker(document.getElementById(id), NodeFilter.SHOW_TEXT);
+    let count = 0;
+    for (let node; (node = walker.nextNode());) {
+        if (node.parentElement.closest('style, script, [data-reader-ui]')) continue;
+        for (const match of node.textContent.matchAll(/\S+/g)) {
+            if (count++ < word) continue;
+            const range = document.createRange();
+            range.setStart(node, match.index);
+            range.setEnd(node, match.index + match[0].length);
+            const rect = range.getBoundingClientRect();
+            return rect.width > 0 && rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 &&
+                rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1;
+        }
+    }
+    return false;
+}
+
 async function visibleIllustration(page, name, rgb) {
     await page.waitForFunction(({ name, rgb }) => {
         const image = document.querySelector(`img[alt="${name} illustration"]`);
@@ -1417,6 +1481,72 @@ for (const mode of ['local', 'vps', 'hosting']) {
                 await page.evaluate(() => getSelection().removeAllRanges());
                 await page.evaluate(speakWord, {});
                 await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+            }
+        });
+
+        await t.test('Edge Read Aloud reads the page the reader showed and closing its bar keeps the page it read', async () => {
+            await page.goto(base, { waitUntil: 'domcontentloaded' });
+            const settings = await page.evaluate(() => localStorage.getItem('edgeReaderSettings'));
+            const size = page.viewport();
+            const shownPage = () => page.$eval('#paged-page-text', text => Number(/^Sayfa (\d+) \//.exec(text.textContent)?.[1]));
+            // Edge's bar opens above the page and shortens it; closing it gives the height back.
+            const resize = async height => {
+                await page.setViewport({ ...size, height });
+                await page.waitForFunction(height => innerHeight === height, {}, height);
+                await delay(400);
+                await waitForPages(page);
+            };
+            try {
+                await page.evaluate(() => localStorage.setItem('edgeReaderSettings', JSON.stringify({
+                    ...JSON.parse(localStorage.getItem('edgeReaderSettings') || '{}'), readingMode: 'paged' })));
+                await page.goto(`${base}/book/book_test_epub?ch=1&local=0`, { waitUntil: 'domcontentloaded' });
+                await waitForPages(page);
+                // A few pages past the chapter start, as after a jump from the table of contents.
+                for (let turn = 0; turn < 2; turn++) {
+                    const before = await shownPage();
+                    await page.keyboard.press('ArrowRight');
+                    await page.waitForFunction(before => Number(/^Sayfa (\d+) \//.exec(
+                        document.getElementById('paged-page-text').textContent)?.[1]) === before + 1, { timeout: 5000 }, before);
+                }
+                // The reader remembers a page once it has settled, well before anyone reaches Ctrl+Shift+U.
+                await delay(400);
+                const shown = await page.evaluate(pagedWords);
+                const number = await shownPage();
+                await resize(size.height - 60);
+                assert.notDeepEqual((await page.evaluate(pagedWords)).first, shown.first,
+                    'The shorter page must begin before the reader\'s text for this check');
+                await resize(size.height);
+                assert.deepEqual((await page.evaluate(pagedWords)).first, shown.first, 'Opening and closing the bar keeps the page');
+                assert.equal(await shownPage(), number);
+
+                // Ctrl+Shift+U opens the bar, then Edge marks the chapter's first word and scrolls to it.
+                await resize(size.height - 60);
+                await page.evaluate(speakWord, { selector: '#book-content > section', scroll: true });
+                await page.waitForFunction(() => getSelection().toString().trim().length > 0, { timeout: 5000 });
+                const started = await page.evaluate(pagedWords);
+                assert.deepEqual(started.selected, shown.first, 'Reading starts where the reader\'s page began');
+                // Edge reads from the selection, then turns the page itself to read on.
+                await page.evaluate(speakWord, { selector: '#' + shown.first.id, word: shown.first.word });
+                await page.evaluate(() => getSelection().removeAllRanges());
+                assert.ok(started.next, 'The chapter must continue on the next page for this check');
+                await page.evaluate(speakWord, { selector: '#' + started.next.id, word: started.next.word });
+                await page.evaluate(() => {
+                    const viewport = document.getElementById('book-viewport');
+                    viewport.scrollLeft = (Math.round(viewport.scrollLeft / viewport.clientWidth) + 1) * viewport.clientWidth + 80;
+                });
+                await page.waitForFunction(() => {
+                    const viewport = document.getElementById('book-viewport');
+                    return viewport.scrollLeft % viewport.clientWidth === 0;
+                }, { timeout: 5000 });
+                // Closing the bar removes Edge's marks, then gives the height back.
+                await page.evaluate(speakWord, {});
+                await resize(size.height);
+                assert.equal(await page.evaluate(pagedWordShown, started.next), true, 'The page Edge read last stays on screen');
+            } finally {
+                await page.evaluate(() => getSelection().removeAllRanges());
+                await page.evaluate(speakWord, {});
+                await page.evaluate(settings => localStorage.setItem('edgeReaderSettings', settings), settings);
+                await page.setViewport(size);
             }
         });
 
