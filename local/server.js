@@ -209,7 +209,7 @@ app.get('/libs/jszip.min.js', (req, res) => res.sendFile(path.join(__dirname, 'l
 for (const filename of ['layout-bundle.js', 'cloud-reader.js', 'range-archive.js', 'upload-queue.js',
     'pdf-outline.js', 'pdf-reader.js', 'pdf-viewer.js', 'pdf-layout-view.js', 'pdf-layout.css',
     'server-reader.js', 'pdf-layout-core.mjs', 'pdf-fonts.mjs', 'pdf-graphics.mjs', 'pdf-source-selection.mjs',
-    'reader-link-history.js', 'reader-link-history.css', 'epub-pagination.js', 'epub-object-view.js', 'page-turn.js', 'page-turn.css', 'reader-tts.js']) {
+    'reader-link-history.js', 'reader-link-history.css', 'epub-pagination.js', 'epub-object-view.js', 'page-turn.js', 'page-turn.css', 'reader-tts.js', 'reader-theme.css', 'reader-toc.js']) {
     app.get(`/reader-core/${filename}`, (req, res) => res.sendFile(path.join(__dirname, '..', 'hosting', 'public', filename)));
 }
 for (const directory of ['katex/dist', 'pdfjs-dist/build', 'pdfjs-dist/cmaps', 'pdfjs-dist/standard_fonts', 'pdfjs-dist/wasm']) {

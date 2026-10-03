@@ -1,0 +1,28 @@
+/* App speech (the orange button) marks the read passage and word in theme colors
+   without changing line or table metrics. Edge Read Aloud keeps its own styling. */
+#book-content .tts-highlight {
+    outline: 1px dashed currentColor;
+    outline-offset: 2px;
+}
+
+::highlight(reader-tts-word) {
+    background-color: color-mix(in srgb, var(--container-bg) 88%, var(--text-color) 12%);
+    color: var(--text-color);
+    text-decoration: underline;
+    text-decoration-color: var(--text-color);
+    text-decoration-thickness: 2px;
+}
+
+/* Edge Read Aloud wraps the whitespace between table cells (and could wrap a cell or
+   row) in an inline msreadoutspan, which a table turns into an anonymous cell or row.
+   Remove only the wrapper's box; the text, the cells and Edge's word marks stay. */
+#book-content :is(table, thead, tbody, tfoot, tr, colgroup) > msreadoutspan {
+    display: contents !important;
+}
+
+#toc-list a.active {
+    background: color-mix(in srgb, var(--container-bg) 90%, var(--text-color) 10%);
+    color: var(--text-color);
+    box-shadow: inset 3px 0 var(--text-color);
+    font-weight: 600;
+}
